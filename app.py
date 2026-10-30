@@ -7,8 +7,8 @@ from openai import OpenAI
 client = OpenAI()
 
 # 페이지 설정
-st.set_page_config(page_title="영어 전문 번역가", page_icon=" @")
-st.title("영어 전문 번역가     ")
+st.set_page_config(page_title="영어 전문 번역가", page_icon=" 🤖")
+st.title("멋진 영어 번역가")
 st.write(" 한국어를 영어로 바꿔드립니다    ")
 
 # 사용자 입력(텍스트)
@@ -51,5 +51,5 @@ if st.button("번역"):
             # 결과 출력
             translated_text = response.output_text
 
-            st.subheader("성공입니 ")
+            st.subheader("성공입니다")
             st.success(  translated_text   )
