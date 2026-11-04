@@ -107,23 +107,6 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# 2. 메인 화면 상단 추천 질문 칩 (Quick Prompt Chips) 영역
-st.markdown("💡 **자주 찾는 업무 및 추천 질문**")
-col1, col2, col3 = st.columns(3)
-
-preset_query = ""
-with col1:
-    if st.button("📊 최근 마케팅 회의록 요약", use_container_width=True):
-        preset_query = "최근 마케팅 회의록을 분석하고 핵심 업무 지시사항을 요약해줘."
-with col2:
-    if st.button("✉️ 마케팅 콘텐츠 기획 지원", use_container_width=True):
-        preset_query = "데이터 기반의 새로운 마케팅 콘텐츠 기획 아이디어를 제안해줘."
-with col3:
-    if st.button("📈 주요 마케팅 지표 분석 점검", use_container_width=True):
-        preset_query = "주요 마케팅 지표 분석 및 전략 수립을 도와줘."
-
-st.markdown("")
-
 # =========================================================
 # 자동 실행형 추천 질문 칩 (Quick Prompt Chips) - key 추가 수정본
 # =========================================================
