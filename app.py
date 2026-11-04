@@ -1,5 +1,9 @@
 
-import os, base64, json, requests
+import os
+import base64
+import json
+import requests
+import io 
 import streamlit as st
 from openai import OpenAI
 
@@ -13,8 +17,11 @@ st.write("음성으로 질문하시면 답변해 드립니다.")
 
 # 역할 지정
 sys_role = """
-당신은 다양한 업무를 처리하는 AI 서비스입니다.
-개인 비서처럼 친절하게 응대합니다.
+당신은 마케팅팀의 우수 직원 '김 대리(Marketing Data Analyst)'를 밀착 보조하는 전문 AI 개인 비서 '에이블'입니다.
+다음과 같은 역할을 수행합니다:
+1. 마케팅 회의록을 분석하고 핵심 업무 지시사항을 정확하게 추출합니다.
+2. 데이터 기반의 마케팅 전략 수립과 콘텐츠 기획을 적극적으로 지원합니다.
+3. 사용자의 질문에 항상 정중하고 전문적인 어조로 친절하게 응대합니다.
 """
 
 # 상태 초기화
@@ -65,3 +72,50 @@ if submit:
         # 응답 출력
         st.subheader("AI 답변")
         st.write(answer)
+        # [2단계 2번] LLM 최종 응답 음성 즉시 재생 (TTS)
+        # (※ 상단 임포트에 import io가 포함되어 있는지 확인해주세요)
+        speech_response = client.audio.speech.create(
+            model="tts-1", voice="alloy", input=answer
+        )
+        audio_bytes = speech_response.content
+        st.audio(io.BytesIO(audio_bytes), format="audio/mp3", autoplay=False)
+        # =========================================================
+# [2단계 3번] 전문 AI 개인비서 UI/UX 구성 (사이드바 확장 및 퀵 프롬프트 칩)
+# =========================================================
+
+# 1. 사이드바 확장 (비서 프로필 + 데이터 연동 상태 카드)
+with st.sidebar:
+    st.markdown("### 🤖 비서 프로필")
+    st.info(
+        "**이름:** 에이블 (AIVLE)\n"
+        "**역할:** 마케팅팀 김 대리 밀착 보조 비서\n"
+        "**상태:** 업무 대기 중"
+    )
+    st.divider()
+    st.markdown("📂 **데이터 및 컨텍스트 관리**")
+    if uploaded_file is not None:
+        st.success(f"파일 연동됨: `{uploaded_file.name}`")
+    else:
+        st.caption("참고용 텍스트 파일이 업로드되지 않았습니다.")
+        
+    st.divider()
+    if st.button("🔄 대화 내용 초기화", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# 2. 메인 화면 상단 추천 질문 칩 (Quick Prompt Chips) 영역
+st.markdown("💡 **자주 찾는 업무 및 추천 질문**")
+col1, col2, col3 = st.columns(3)
+
+preset_query = ""
+with col1:
+    if st.button("📊 최근 마케팅 회의록 요약", use_container_width=True):
+        preset_query = "최근 마케팅 회의록을 분석하고 핵심 업무 지시사항을 요약해줘."
+with col2:
+    if st.button("✉️ 마케팅 콘텐츠 기획 지원", use_container_width=True):
+        preset_query = "데이터 기반의 새로운 마케팅 콘텐츠 기획 아이디어를 제안해줘."
+with col3:
+    if st.button("📈 주요 마케팅 지표 분석 점검", use_container_width=True):
+        preset_query = "주요 마케팅 지표 분석 및 전략 수립을 도와줘."
+
+st.markdown("")
