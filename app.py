@@ -2134,6 +2134,141 @@ def page_settings():
     with st.expander("ℹ️ 저장 방식 안내"):
         st.write(f"작업공간 저장 파일: `{os.path.abspath(DB_FILE)}` (SQLite)")
         st.caption("같은 서버에서는 새로고침·재접속해도 유지됩니다. Streamlit Cloud는 재배포·재시작 때 파일이 지워질 수 있으니 백업 ZIP을 받아 두세요.")
+# ── 15. 업무 상세 드롭다운 (상세 내용·기한·중간 점검·결과물·근거 + 수정 폼) ──
+SAMPLE_DETAILS = {
+    "t1": {"상세": "광고 A/B안의 클릭률·전환율을 비교하고 우세안을 정리합니다.", "결과물": "비교표 XLSX와 1페이지 요약", "근거": "주간 마케팅 회의"},
+    "t2": {"상세": "11월 캠페인의 채널별 성과를 정리해 팀장님께 보고합니다.", "중간 점검": "초안 공유 후 피드백 반영", "결과물": "성과 리포트 PPT", "근거": "주간 마케팅 회의"},
+    "t3": {"상세": "보도자료 문구와 제품 정보가 맞는지 검토합니다.", "선행 조건": "제품팀 최종 스펙 확정", "근거": "신제품 기획 회의"},
+}
+for _t in ss.tasks:
+    for _k, _v in SAMPLE_DETAILS.get(_t["id"], {}).items():
+        _t.setdefault(_k, _v)
+
+
+def extract_candidates(prompt, files):
+    # (상세 버전) 업무 후보에 상세 내용·중간 점검·결과물·선행 조건까지 함께 추출
+    docs = list(files) + [f for f in ss.library if f["rag"] and f["text"] and f not in files]
+    sources = {f["name"]: f["text"] for f in docs if f.get("text")}
+    if not sources:
+        return 0
+    context = "\n\n".join(f"[파일 {n}]\n{t}" for n, t in sources.items())[:30000]
+    sysmsg = ('자료에서 담당자에게 배정된 업무를 모두 찾아 JSON으로만 답하라. 없는 담당자·날짜를 만들지 마라. '
+              '중간 점검과 최종 기한을 구분하라. 기한이 불확실하면 due는 빈 문자열. '
+              'quote는 근거가 되는 원문을 그대로 짧게 인용. 해당 내용이 없으면 빈 문자열. '
+              '형식: {"tasks": [{"title": "", "owner": "", "details": "업무 내용 2~3문장", '
+              '"deadline_text": "원문 표현 그대로의 기한", "due": "YYYY-MM-DD 또는 빈 문자열", '
+              '"checkpoint": "중간 점검", "deliverable": "결과물", "dependency": "선행 조건", '
+              '"priority": "높음|보통|낮음", "source": "파일명", "quote": ""}]}')
+    try:
+        out = parse_json(llm([{"role": "system", "content": sysmsg + f"\n오늘 날짜: {TODAY}"},
+                              {"role": "user", "content": f"요청: {prompt}\n\n{context}"}], json_mode=True))
+    except Exception:
+        return 0
+    norm = lambda x: re.sub(r"\s+", "", str(x))
+    n = 0
+    for t in out.get("tasks", [])[:30]:
+        if not t.get("title"):
+            continue
+        raw = sources.get(t.get("source", ""), " ".join(sources.values()))
+        t.update(id=uuid.uuid4().hex[:8], verified=bool(t.get("quote") and norm(t["quote"]) in norm(raw)))
+        ss.candidates.append(t)
+        n += 1
+    return n
+
+
+def accept_candidate(cid):
+    c = next(x for x in ss.candidates if x["id"] == cid)
+    has_due = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(c.get("due", ""))))
+    t = {"id": uuid.uuid4().hex[:8], "업무": c["title"], "담당자": c.get("owner") or ss.settings["name"],
+         "마감일": to_date(c["due"]) if has_due else TODAY + timedelta(days=7), "상태": "대기",
+         "우선순위": c.get("priority") if c.get("priority") in ("높음", "보통", "낮음") else "보통",
+         "상세": c.get("details", ""), "기한 설명": c.get("deadline_text") or ("" if has_due else "미정"),
+         "중간 점검": c.get("checkpoint", ""), "결과물": c.get("deliverable", ""),
+         "선행 조건": c.get("dependency", ""), "근거": c.get("source", ""), "인용": c.get("quote", "")}
+    ss.tasks.append(t)
+    record_change(t, "등록", "-", f"검토함에서 반영 (근거: {c.get('source', '')})")
+    ss.candidates = [x for x in ss.candidates if x["id"] != cid]
+
+
+def candidates_ui():
+    if not ss.candidates:
+        st.caption("검토할 업무가 없습니다. 채팅에서 회의록을 첨부하고 '담당자별 업무 정리해줘'라고 요청해 보세요.")
+    for c in ss.candidates:
+        with st.expander(f"{c['title']} · {c.get('owner') or '담당자 미정'}"):
+            if c.get("details"):
+                st.write(c["details"])
+            st.caption(f"기한 {c.get('deadline_text') or c.get('due') or '미정'} / 중간 점검 {c.get('checkpoint') or '없음'}")
+            if c.get("deliverable") or c.get("dependency"):
+                st.caption(f"결과물 {c.get('deliverable') or '-'} / 선행 조건 {c.get('dependency') or '-'}")
+            st.caption(f"근거 · {c.get('source', '')}")
+            st.code(c.get("quote", ""), language=None)
+            st.caption("✅ 원문과 일치하는 근거 확인됨" if c.get("verified") else "⚠️ 원문 일치 미확인 · 자료를 직접 확인해 주세요.")
+            ok = st.checkbox("원문과 담당자·기한을 확인했습니다", key=f"cand_ok_{c['id']}")
+            a, b = st.columns(2)
+            a.button("✅ 업무에 반영", key=f"cand_acc_{c['id']}", on_click=accept_candidate, args=(c["id"],), disabled=not ok)
+            b.button("❌ 제외", key=f"cand_rej_{c['id']}", on_click=reject_candidate, args=(c["id"],))
+
+
+def task_detail(t, prefix):
+    # 이미지처럼: 펼치면 상세 내용 → 기한/중간 점검 → 결과물/선행 조건 → 근거 → 인용 → 수정 폼 → 대화하기
+    with st.expander(f"{t['업무']} · {t['담당자']} · {t['상태']}"):
+        st.write(t.get("상세") or "상세 내용이 없습니다. 아래에서 직접 적을 수 있습니다.")
+        st.caption(f"기한 {t.get('기한 설명') or t['마감일']} ({dday(t['마감일'])}) / 중간 점검 {t.get('중간 점검') or '없음'}")
+        if t.get("결과물") or t.get("선행 조건"):
+            st.caption(f"결과물 {t.get('결과물') or '-'} / 선행 조건 {t.get('선행 조건') or '-'}")
+        st.caption(f"근거 · {t.get('근거') or '직접 등록'}")
+        if t.get("인용"):
+            st.code(t["인용"], language=None)
+        ver = f"{t['id']}_{t['상태']}_{t['마감일']}"  # 다른 화면에서 값이 바뀌면 폼도 새 값으로 다시 그림
+        with st.form(f"{prefix}_form_{ver}"):
+            status = st.selectbox("진행 상태", STATUS_LIST,
+                                  index=STATUS_LIST.index(t["상태"]) if t["상태"] in STATUS_LIST else 0)
+            desc = st.text_input("기한 설명", value=t.get("기한 설명", ""), placeholder=f"예: {t['마감일']} 10:00")
+            iso = st.text_input("달력 날짜 YYYY-MM-DD · 미정이면 비움", value=str(t["마감일"]))
+            detail = st.text_area("상세 내용", value=t.get("상세", ""), height=90)
+            if st.form_submit_button("변경 저장"):
+                try:
+                    new_due = date.fromisoformat(iso.strip()) if iso.strip() else t["마감일"]
+                except ValueError:
+                    st.error("날짜를 YYYY-MM-DD 형식으로 입력하세요. 예: 2026-11-10")
+                else:
+                    if not iso.strip():
+                        desc = "미정"
+                    for field, value in [("상태", status), ("마감일", new_due), ("기한 설명", desc), ("상세", detail)]:
+                        record_change(t, field, t.get(field, ""), value)
+                        t[field] = value
+                    st.rerun()
+        st.button("💬 이 업무로 대화하기", key=f"{prefix}_talk_{t['id']}", on_click=go,
+                  args=("💬 채팅", f"'{t['업무']}' 업무(담당 {t['담당자']}, 기한 {t.get('기한 설명') or t['마감일']}, "
+                                  f"내용: {t.get('상세', '')})를 어떻게 진행하면 좋을지 단계별로 알려줘"))
+
+
+_v4_page_my_tasks = page_my_tasks
+
+
+def page_my_tasks():
+    _v4_page_my_tasks()
+    st.divider()
+    st.subheader("📂 업무 상세 보기")
+    mine = sorted([t for t in ss.tasks if t["담당자"] == ss.settings["name"]], key=lambda x: x["마감일"])
+    for t in mine:
+        task_detail(t, "mydet")
+    if not mine:
+        st.caption("내 업무가 없습니다.")
+
+
+_v4_page_team = page_team
+
+
+def page_team():
+    _v4_page_team()
+    if not ss.tasks:
+        return
+    st.divider()
+    st.subheader("📂 담당자별 업무 상세")
+    owner = st.selectbox("상세를 볼 담당자", ["전체"] + sorted({t["담당자"] for t in ss.tasks}), key="team_detail_owner")
+    for t in sorted([t for t in ss.tasks if owner == "전체" or t["담당자"] == owner], key=lambda x: x["마감일"]):
+        task_detail(t, "teamdet")
 
 
 # ---------------------------------------------------------------------
