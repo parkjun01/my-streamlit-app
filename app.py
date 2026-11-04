@@ -631,10 +631,55 @@ def lib_attach(fid):
     ss.menu = "💬 채팅"
 
 
+LIB_DIR = "library"  # Colab에서는 /content/library
+
+
+def lib_import_folder():
+    os.makedirs(LIB_DIR, exist_ok=True)
+    n = 0
+    for fn in sorted(os.listdir(LIB_DIR)):
+        if fn.rsplit(".", 1)[-1].lower() in CHAT_TYPES:
+            with open(os.path.join(LIB_DIR, fn), "rb") as fp:
+                add_to_library(fn, fp.read(), "폴더")
+            n += 1
+    ss.notice = f"📂 폴더에서 {n}개 파일을 불러왔습니다." if n else f"📂 '{LIB_DIR}' 폴더에 파일이 없습니다."
+
+
+def lib_add_text():
+    body = ss.get("lib_text_body", "")
+    if not body.strip():
+        ss.notice = "⚠️ 내용을 입력해 주세요."
+        return
+    name = ss.get("lib_text_name", "").strip() or f"메모_{datetime.now():%m%d_%H%M%S}"
+    if not name.endswith(".txt"):
+        name += ".txt"
+    add_to_library(name, body.encode("utf-8"), "직접 입력")
+    ss.lib_text_name = ""
+    ss.lib_text_body = ""
+    ss.notice = f"✍️ '{name}'을(를) 자료실에 추가했습니다."
+
+
 def page_library():
     st.header("📁 자료실")
-    st.file_uploader("자료 추가", type=CHAT_TYPES, accept_multiple_files=True, key=f"lib_up_{ss.lib_key}")
-    st.button("➕ 자료실에 추가", on_click=lib_upload)
+    if ss.notice:
+        st.success(ss.notice)
+        ss.notice = ""
+
+    tab1, tab2, tab3 = st.tabs(["⬆️ 파일 업로드", "📂 폴더에서 가져오기", "✍️ 텍스트 붙여넣기"])
+    with tab1:
+        st.file_uploader("자료 추가", type=CHAT_TYPES, accept_multiple_files=True, key=f"lib_up_{ss.lib_key}")
+        st.button("➕ 자료실에 추가", on_click=lib_upload)
+        st.caption("업로드 오류가 나면 '폴더에서 가져오기'나 '텍스트 붙여넣기'를 사용하세요.")
+    with tab2:
+        os.makedirs(LIB_DIR, exist_ok=True)
+        st.write(f"이 폴더에 파일을 넣은 뒤 버튼을 누르세요: `{os.path.abspath(LIB_DIR)}`")
+        found = [fn for fn in sorted(os.listdir(LIB_DIR)) if fn.rsplit(".", 1)[-1].lower() in CHAT_TYPES]
+        st.caption("폴더 안 파일: " + (", ".join(found) if found else "없음"))
+        st.button("📂 폴더 파일 불러오기", on_click=lib_import_folder)
+    with tab3:
+        st.text_input("파일 이름", key="lib_text_name", placeholder="예: 11월_마케팅회의록")
+        st.text_area("내용", key="lib_text_body", height=200, placeholder="회의록이나 참고 자료를 붙여 넣으세요.")
+        st.button("✍️ 자료실에 저장", on_click=lib_add_text)
 
     query = st.text_input("🔍 파일명·내용 검색")
     files = [f for f in ss.library if not query or query in f["name"] or query in f["text"]]
@@ -650,7 +695,7 @@ def page_library():
             c4.button("💬 대화에 활용", key=f"use_{f['id']}", on_click=lib_attach, args=(f["id"],))
             c5.button("🗑️", key=f"del_{f['id']}", on_click=lib_delete, args=(f["id"],))
     if not files:
-        st.info("자료가 없습니다. 파일을 업로드하거나 채팅 답변을 저장해 보세요.")
+        st.info("자료가 없습니다. 위의 세 가지 방법 중 하나로 자료를 추가해 보세요.")
 
 
 # ---------------------------------------------------------------------
