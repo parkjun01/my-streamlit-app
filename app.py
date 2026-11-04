@@ -194,3 +194,46 @@ if submit or st.session_state.preset_query:
         
         st.subheader("AI 답변")
         st.write(answer)
+# [3단계] 멀티턴 대화 히스토리 관리 (최근 10개 메시지 유지)
+    # 1. 사용자 메시지 세션에 추가
+    st.session_state.messages.append({"role": "user", "content": user_text})
+
+    # 2. 시스템 메시지 + 최근 10개 메시지만 슬라이싱하여 API 전달용 구성
+    system_content = sys_role
+    if text:
+        system_content += f"\n\n다음 내용을 참고하세요:\n{text}"
+        
+    input_messages = [{"role": "system", "content": system_content}]
+    
+    # 최근 10개 메시지(최대 10개)만 가져오기
+    recent_messages = st.session_state.messages[-10:]
+    input_messages.extend(recent_messages)
+
+    # 3. LLM 호출 및 응답 받기
+    with st.spinner("답변을 준비하고 있습니다..."):
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=input_messages
+        )
+        answer = response.choices[0].message.content
+
+        # 4. 어시스턴트(AI) 응답도 세션에 추가
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+        # 5. 화면에 대화 내역 및 TTS 재생 출력
+        speech_response = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=answer
+        )
+        audio_bytes = speech_response.read()
+        
+        st.caption("🔊 AI 비서 음성 답변")
+        st.audio(io.BytesIO(audio_bytes), format="audio/mp3", autoplay=False)
+        
+        st.subheader("AI 답변")
+        st.write(answer)
+# 이전 대화 내용 화면에 출력하기
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
