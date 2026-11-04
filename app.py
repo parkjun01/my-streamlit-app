@@ -123,26 +123,26 @@ with col3:
         preset_query = "주요 마케팅 지표 분석 및 전략 수립을 도와줘."
 
 st.markdown("")
+
 # =========================================================
-# [2단계 3번 확장] 자동 실행형 추천 질문 칩 (Quick Prompt Chips)
+# 자동 실행형 추천 질문 칩 (Quick Prompt Chips) - key 추가 수정본
 # =========================================================
 st.markdown("💡 **자주 찾는 업무 및 추천 질문 (클릭 시 즉시 실행)**")
 col1, col2, col3 = st.columns(3)
 
-# 칩 클릭 상태를 저장할 키 초기화
 if "preset_query" not in st.session_state:
     st.session_state.preset_query = ""
 
 with col1:
-    if st.button("📊 최근 마케팅 회의록 요약", use_container_width=True):
+    if st.button("📊 최근 마케팅 회의록 요약", use_container_width=True, key="btn_summary"):
         st.session_state.preset_query = "최근 마케팅 회의록을 분석하고 핵심 업무 지시사항을 요약해줘."
-        st.rerun() # 클릭 즉시 실행을 위해 새로고침
+        st.rerun()
 with col2:
-    if st.button("✉️ 마케팅 콘텐츠 기획 지원", use_container_width=True):
+    if st.button("✉️ 마케팅 콘텐츠 기획 지원", use_container_width=True, key="btn_content"):
         st.session_state.preset_query = "데이터 기반의 새로운 마케팅 콘텐츠 기획 아이디어를 제안해줘."
         st.rerun()
 with col3:
-    if st.button("📈 주요 마케팅 지표 분석 점검", use_container_width=True):
+    if st.button("📈 주요 마케팅 지표 분석 점검", use_container_width=True, key="btn_metrics"):
         st.session_state.preset_query = "주요 마케팅 지표 분석 및 전략 수립을 도와줘."
         st.rerun()
 
