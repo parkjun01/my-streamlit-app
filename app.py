@@ -152,15 +152,16 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# [조건] 폼의 '실행' 버튼을 눌렀거나 OR '추천 질문 칩'이 클릭된 경우 실행
+# 기존의 `if submit:` 또는 `if submit or st.session_state.preset_query:` 블록을 아래 코드로 교체하세요.
+
+# 버튼을 눌렀거나 추천 질문 칩이 클릭되었을 때 실행
 if submit or st.session_state.preset_query:
-    
-    # 업로드 된 파일 처리
+    # 업로드 된 파일이 있으면 디코딩
     text = ""
     if uploaded_file is not None:
         text = uploaded_file.read().decode("utf-8")
 
-    # 텍스트 소스 결정
+    # 텍스트 소스 결정 (칩이 눌렸다면 칩의 내용, 아니면 녹음 확인)
     user_text = ""
     if st.session_state.preset_query:
         user_text = st.session_state.preset_query
@@ -180,19 +181,18 @@ if submit or st.session_state.preset_query:
     system_content = sys_role
     if text:
         system_content += f"\n\n다음 내용을 참고하세요:\n{text}"
-        
     input_messages = [{"role": "system", "content": system_content}]
     input_messages.append({"role": "user", "content": user_text})
 
-    # LLM 호출 및 응답
+    # LLM 호출 및 응답 듣기 (정상적인 chat.completions 사용)
     with st.spinner("답변을 준비하고 있습니다..."):
-        response = client.responses.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
-            input=input_messages
+            messages=input_messages
         )
-        answer = response.output_text
+        answer = response.choices[0].message.content
 
-        # TTS 음성 재생
+        # TTS 음성 재생 (AI 답변 상단 음성 플레이어 배치)
         speech_response = client.audio.speech.create(
             model="tts-1",
             voice="alloy",
