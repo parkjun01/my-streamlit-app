@@ -68,7 +68,6 @@ if submit:
             input=input_messages
         )
         answer = response.output_text
-
 # ── (추가) 기존 음성 폼의 결과 출력 + 대화 히스토리 저장 ──────────────
     st.session_state.messages.append({"role": "user", "content": transcript.text})
     st.session_state.messages.append({"role": "assistant", "content": answer})
@@ -90,15 +89,26 @@ if submit:
 #  AI 개인비서 '에이블(Able)' 확장 기능
 # =====================================================================
 import hashlib
+import re
+import smtplib
 import uuid
 from datetime import date, datetime, timedelta
+from email.message import EmailMessage
 import pandas as pd
 
 ss = st.session_state
 TODAY = date.today()
 
 # 화면 표시 모델명 → 실제 호출 모델
-MODEL_MAP = {"Luna 6": "gpt-4o-mini", "Luna 6 Pro": "gpt-4o"}
+MODEL_MAP = {
+    "Luna 6": "gpt-4o-mini",
+    "GPT-4": "gpt-4",
+    "GPT-4o": "gpt-4o",
+    "GPT-4o mini": "gpt-4o-mini",
+    "GPT-4.1": "gpt-4.1",
+    "GPT-4.1 mini": "gpt-4.1-mini",
+}
+LEGACY_MODELS = {"gpt-4"}  # 이미지·PDF 직접 분석과 JSON 모드를 지원하지 않는 모델
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICES = ["alloy", "nova", "shimmer", "coral", "echo", "onyx", "fable"]
 MENUS = ["🏠 홈", "💬 채팅", "📁 자료실", "✅ 내 작업", "👥 팀 업무 현황", "📧 이메일 관리", "⚙️ 설정"]
@@ -108,6 +118,10 @@ CHAT_TYPES = ["pdf", "png", "jpg", "jpeg", "webp", "txt", "md", "csv", "docx"]
 IMG_MIME = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
 INTENT_LABEL = {"chat": "💬 일반 대화", "email": "📧 이메일 작성·발송", "calendar": "📅 캘린더 일정",
                 "task": "✅ 업무 등록", "translate": "🌐 번역"}
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
+DATA_FILE = "able_data.json"          # 설정·연락처·보낸 메일 저장 파일
+SAVE_KEYS = ["settings", "contacts", "sent"]
+LIB_DIR = "library"                   # 자료실 폴더 (Colab에서는 /content/library)
 
 
 # ---------------------------------------------------------------------
@@ -120,6 +134,12 @@ def _defaults():
         "settings": {"name": "김 대리", "team": "마케팅팀", "role": "Marketing Data Analyst",
                      "model": "Luna 6", "common_prompt": "", "voice": "alloy",
                      "tts_on": True, "autoplay": True, "stt_lang": "ko"},
+        "contacts": [
+            {"이름": "최 팀장", "이메일": "choi@company.com", "직책": "마케팅팀장"},
+            {"이름": "이 과장", "이메일": "lee@company.com", "직책": "과장"},
+            {"이름": "박 사원", "이메일": "park@company.com", "직책": "사원"},
+            {"이름": "정 실장", "이메일": "jung@agency.com", "직책": "광고대행사 실장"},
+        ],
         "tasks": [
             {"id": "t1", "업무": "SNS 광고 A/B 테스트 결과 분석", "담당자": "김 대리", "마감일": d, "상태": "진행 중", "우선순위": "높음"},
             {"id": "t2", "업무": "11월 캠페인 성과 리포트 작성", "담당자": "김 대리", "마감일": d + timedelta(days=1), "상태": "진행 중", "우선순위": "높음"},
@@ -141,7 +161,7 @@ def _defaults():
             {"id": "m1", "from": "최 팀장", "addr": "choi@company.com", "date": f"{d} 08:40",
              "subject": "연말 프로모션 아이디어 요청",
              "body": "김 대리님, 금요일까지 연말 프로모션 아이디어 3가지를 정리해서 공유 부탁드립니다."},
-            {"id": "m2", "from": "광고대행사 정 실장", "addr": "jung@agency.com", "date": f"{d} 07:55",
+            {"id": "m2", "from": "정 실장", "addr": "jung@agency.com", "date": f"{d} 07:55",
              "subject": "오늘 11시 미팅 자료 송부",
              "body": "안녕하세요, 오늘 미팅 때 논의할 4분기 매체 집행안을 미리 보내드립니다. 검토 부탁드립니다."},
             {"id": "m3", "from": "이 과장", "addr": "lee@company.com", "date": f"{d - timedelta(days=1)} 18:10",
@@ -149,6 +169,7 @@ def _defaults():
              "body": "후보 리스트 1차 정리했습니다. 데이터 기준으로 우선순위 의견 주시면 반영하겠습니다."},
         ],
         "sent": [],
+        "smtp": {},
         "library": [],
         "suggestions": [],
         "pending_prompt": None,
@@ -162,9 +183,38 @@ def _defaults():
         "notice": "",
     }
 
+
+def load_data():
+    try:
+        with open(DATA_FILE, encoding="utf-8") as fp:
+            return json.load(fp)
+    except Exception:
+        return {}
+
+
+def save_data():
+    # 설정(사용 모델 포함)·연락처·보낸 메일을 파일에 저장 → 새로고침해도 유지
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as fp:
+            json.dump({k: ss[k] for k in SAVE_KEYS}, fp, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        st.sidebar.caption(f"⚠️ 저장 실패: {e}")
+
+
 for _k, _v in _defaults().items():
     if _k not in ss:
         ss[_k] = _v
+
+if "data_loaded" not in ss:
+    _saved = load_data()
+    if isinstance(_saved.get("settings"), dict):
+        ss.settings.update(_saved["settings"])
+    for _k in ("contacts", "sent"):
+        if isinstance(_saved.get(_k), list):
+            ss[_k] = _saved[_k]
+    if ss.settings.get("model") not in MODEL_MAP:
+        ss.settings["model"] = "Luna 6"
+    ss.data_loaded = True
 
 
 # ---------------------------------------------------------------------
@@ -186,6 +236,16 @@ def dday(d):
     return "D-day" if n == 0 else (f"D-{n}" if n > 0 else f"D+{-n}")
 
 
+def show_notice():
+    if ss.notice:
+        (st.warning if ss.notice.startswith("⚠️") else st.success)(ss.notice)
+        ss.notice = ""
+
+
+def contacts_text():
+    return "\n".join(f"- {c['이름']} ({c.get('직책', '')}) <{c['이메일']}>" for c in ss.contacts) or "- 없음"
+
+
 def base_system():
     s = ss.settings
     today_sch = "\n".join(f"- {e['시간']} {e['일정']}" for e in sorted(ss.schedule, key=lambda x: x["시간"])
@@ -193,15 +253,21 @@ def base_system():
     my_open = "\n".join(f"- {t['업무']} (마감 {t['마감일']}, {t['상태']}, 우선순위 {t['우선순위']})"
                         for t in ss.tasks if t["담당자"] == s["name"] and t["상태"] != "완료") or "- 없음"
     prompt = (sys_role + f"\n사용자: {s['name']} ({s['team']}, {s['role']})\n오늘 날짜: {TODAY}"
-              f"\n\n[오늘 일정]\n{today_sch}\n\n[사용자의 미완료 업무]\n{my_open}")
+              f"\n\n[오늘 일정]\n{today_sch}\n\n[사용자의 미완료 업무]\n{my_open}"
+              f"\n\n[팀 연락처]\n{contacts_text()}")
     if s["common_prompt"]:
         prompt += f"\n\n[공통 지침]\n{s['common_prompt']}"
     return prompt
 
 
+def parse_json(textval):
+    m = re.search(r"\{.*\}", textval, re.S)
+    return json.loads(m.group() if m else textval)
+
+
 def llm(messages, json_mode=False):
     kwargs = {"model": model_id(), "input": messages}
-    if json_mode:
+    if json_mode and model_id() not in LEGACY_MODELS:
         kwargs["text"] = {"format": {"type": "json_object"}}
     return client.responses.create(**kwargs).output_text
 
@@ -230,6 +296,62 @@ def stt(audio_bytes):
         model="whisper-1", file=("audio.wav", audio_bytes, "audio/wav"),
         language=ss.settings["stt_lang"])
     return r.text
+
+
+# ---------------------------------------------------------------------
+# 연락처 / 메일 발송
+# ---------------------------------------------------------------------
+def find_contact(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    for c in ss.contacts:
+        if raw.lower() == c["이메일"].lower() or raw == c["이름"]:
+            return c
+    key = raw.replace(" ", "").replace("님", "").replace("에게", "").replace("한테", "")
+    for c in ss.contacts:
+        name = c["이름"].replace(" ", "")
+        if key and name and (name in key or key in name):
+            return c
+    return None
+
+
+def upsert_contact(name, email, title=""):
+    for c in ss.contacts:
+        if c["이메일"].lower() == email.lower():
+            c["이름"] = name or c["이름"]
+            if title:
+                c["직책"] = title
+            return
+    ss.contacts.append({"이름": name or email.split("@")[0], "이메일": email, "직책": title})
+
+
+def smtp_conf():
+    user = ss.smtp.get("user") or os.environ.get("SMTP_USER", "")
+    pw = ss.smtp.get("password") or os.environ.get("SMTP_PASSWORD", "")
+    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("SMTP_PORT", "465"))
+    return user, pw, host, port
+
+
+def deliver(to_addr, subject, body, name=None):
+    # Gmail 계정이 설정되어 있으면 실제 발송, 없으면 모의 발송
+    user, pw, host, port = smtp_conf()
+    mode = "모의 발송"
+    if user and pw:
+        msg = EmailMessage()
+        msg["From"], msg["To"], msg["Subject"] = user, to_addr, subject
+        msg.set_content(body)
+        with smtplib.SMTP_SSL(host, port, timeout=20) as server:
+            server.login(user, pw)
+            server.send_message(msg)
+        mode = "실제 발송"
+    rec = {"받는 사람": f"{name} <{to_addr}>" if name else to_addr, "제목": subject, "본문": body,
+           "발송 시각": datetime.now().strftime("%Y-%m-%d %H:%M"), "방식": mode}
+    ss.sent.append(rec)
+    if not any(c["이메일"].lower() == to_addr.lower() for c in ss.contacts):
+        upsert_contact(name, to_addr)  # 처음 보낸 주소는 연락처에 자동 저장
+    return rec
 
 
 # ---------------------------------------------------------------------
@@ -280,18 +402,18 @@ def rag_context(query):
     return "\n\n".join(f"[출처: {n}]\n{c}" for _, n, c in top), [n for _, n, _ in top]
 
 
-def file_parts(f):
+def file_parts(f, vision=True):
     # 멀티모달 입력: 이미지·PDF는 원본 그대로, 문서는 추출한 텍스트로 전달
     ext = f["name"].rsplit(".", 1)[-1].lower()
     b64 = base64.b64encode(f["data"]).decode()
-    if ext in IMG_MIME:
+    if vision and ext in IMG_MIME:
         return [{"type": "input_image", "image_url": f"data:{IMG_MIME[ext]};base64,{b64}"}]
-    if ext == "pdf":
+    if vision and ext == "pdf":
         return [{"type": "input_file", "filename": f["name"],
                  "file_data": f"data:application/pdf;base64,{b64}"}]
     if f["text"]:
         return [{"type": "input_text", "text": f"[첨부: {f['name']}]\n{f['text'][:15000]}"}]
-    return []
+    return [{"type": "input_text", "text": f"[첨부: {f['name']}] (현재 모델은 이 파일을 직접 읽을 수 없음)"}]
 
 
 # ---------------------------------------------------------------------
@@ -299,20 +421,24 @@ def file_parts(f):
 # ---------------------------------------------------------------------
 ROUTER_PROMPT = """너는 업무 비서의 라우터다. 사용자 요청을 분석해 JSON으로만 답하라.
 intent는 chat | email | calendar | task | translate 중 하나.
-- email: 이메일 작성/발송 요청. args: {"to": 받는 사람, "subject": 제목, "body": 정중한 업무 메일 본문}
+- email: 이메일 작성/발송 요청. args: {"to": 받는 사람 이름 또는 이메일 주소(연락처 이름 그대로), "subject": 제목, "body": 정중한 업무 메일 본문(끝에 '{sender}' 서명)}
 - calendar: 일정 추가/조율. args: {"date": "YYYY-MM-DD", "time": "HH:MM", "title": 일정명}
 - task: 업무 등록. args: {"title": 업무명, "owner": 담당자, "due": "YYYY-MM-DD", "priority": "높음|보통|낮음"}
 - translate: 번역 요청. args: {"target_lang": 언어}
 - chat: 그 외 대화·요약·분석. args: {}
 오늘 날짜: {today}
+등록된 연락처:
+{contacts}
 형식: {"intent": "...", "args": {...}}"""
 
 
 def route(prompt):
+    s = ss.settings
+    sysmsg = (ROUTER_PROMPT.replace("{today}", str(TODAY)).replace("{contacts}", contacts_text())
+              .replace("{sender}", f"{s['team']} {s['name']}"))
     try:
-        out = llm([{"role": "system", "content": ROUTER_PROMPT.replace("{today}", str(TODAY))},
-                   {"role": "user", "content": prompt}], json_mode=True)
-        r = json.loads(out)
+        r = parse_json(llm([{"role": "system", "content": sysmsg}, {"role": "user", "content": prompt}],
+                           json_mode=True))
         if r.get("intent") in INTENT_LABEL:
             r.setdefault("args", {})
             return r
@@ -328,11 +454,22 @@ def route(prompt):
 
 
 def tool_email(a):
-    mail = {"받는 사람": a.get("to") or "(미지정)", "제목": a.get("subject") or "(제목 없음)",
-            "본문": a.get("body") or "", "발송 시각": datetime.now().strftime("%Y-%m-%d %H:%M")}
-    ss.sent.append(mail)
-    return (f"이메일 발송 완료(모의) → 받는 사람: {mail['받는 사람']}, 제목: {mail['제목']}\n본문:\n{mail['본문']}",
-            [mail])
+    # 받는 사람을 연락처에서 찾아 메일 초안을 만든다 (발송은 사용자가 버튼으로 확인)
+    raw = str(a.get("to") or "")
+    c = find_contact(raw)
+    m = EMAIL_RE.search(raw)
+    if c:
+        addr, name = c["이메일"], c["이름"]
+    elif m:
+        addr, name = m.group(), None
+    else:
+        return (f"'{raw or '받는 사람'}'의 이메일 주소를 연락처에서 찾지 못해 초안을 만들지 않았다. "
+                "사용자에게 이메일 주소를 알려 달라고 하거나 '이메일 관리 > 연락처'에 등록하라고 안내하라."), None
+    ss["_draft"] = {"to": addr, "name": name, "subject": a.get("subject") or "(제목 없음)",
+                    "body": a.get("body") or ""}
+    return (f"이메일 초안 작성 완료 → 받는 사람: {name or addr} <{addr}>, 제목: {ss['_draft']['subject']}. "
+            "아직 발송 전이며, 사용자가 아래 '📤 이 메일 보내기' 버튼을 누르면 발송된다. "
+            "본문을 다시 쓰지 말고 짧게 안내하라."), None
 
 
 def tool_calendar(a):
@@ -369,9 +506,9 @@ TOOLS = {"email": ("📧 이메일 도구", tool_email),
 def make_suggestions(q, a):
     try:
         out = llm([{"role": "system", "content": '대화 흐름에 이어서 사용자가 물어볼 만한 짧은 후속 질문 3개를 '
-                                                 'JSON으로 만들어라. 형식: {"questions": ["...", "...", "..."]}'},
+                                                 'JSON으로만 만들어라. 형식: {"questions": ["...", "...", "..."]}'},
                    {"role": "user", "content": f"질문: {q}\n답변: {a[:2000]}"}], json_mode=True)
-        return json.loads(out).get("questions", [])[:3]
+        return parse_json(out).get("questions", [])[:3]
     except Exception:
         return []
 
@@ -404,13 +541,52 @@ def toggle_task(tid):
             t["상태"] = "완료" if ss[f"chk_{tid}"] else "진행 중"
 
 
+def change_model():
+    ss.settings["model"] = ss.sb_model
+
+
+def send_draft(i):
+    d = ss.messages[i]["draft"]
+    try:
+        rec = deliver(d["to"], d["subject"], d["body"], d["name"])
+        d["sent"] = f"{rec['방식']} 완료 · {rec['발송 시각']}"
+        d.pop("error", None)
+    except Exception as e:
+        d["error"] = str(e)
+
+
+def edit_draft(i):
+    d = ss.messages[i]["draft"]
+    ss.mail_to, ss.mail_subject, ss.mail_body = d["to"], d["subject"], d["body"]
+    ss.menu = "📧 이메일 관리"
+    ss.notice = "✏️ 초안을 '메일 작성' 탭에 옮겼습니다. 수정한 뒤 보내세요."
+
+
 # ---------------------------------------------------------------------
 # 채팅: 출력 렌더링 / 한 턴 처리
 # ---------------------------------------------------------------------
+def render_draft(i, d):
+    with st.container(border=True):
+        st.markdown(f"**📧 받는 사람:** {d['name'] or ''} <{d['to']}>  \n**제목:** {d['subject']}")
+        st.text(d["body"])
+        if d.get("sent"):
+            st.success(f"✅ {d['sent']}")
+            return
+        if d.get("error"):
+            st.error(f"⚠️ 발송 실패: {d['error']}")
+        c1, c2 = st.columns(2)
+        c1.button("📤 이 메일 보내기", key=f"send_{i}", on_click=send_draft, args=(i,), type="primary")
+        c2.button("✏️ 수정해서 보내기", key=f"edit_{i}", on_click=edit_draft, args=(i,))
+
+
 def render_extras(i, m):
-    # Rich Output: 표, 다운로드, 자료실 저장, 피드백, 복사
+    # Rich Output: 메일 초안, 표, 다운로드, 자료실 저장, 피드백, 복사
+    if m.get("draft"):
+        render_draft(i, m["draft"])
     if m.get("table"):
         st.dataframe(pd.DataFrame(m["table"]), hide_index=True)
+    if m.get("model"):
+        st.caption(f"🧠 {m['model']}")
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
         st.download_button("⬇️ 다운로드", m["content"], file_name=f"able_answer_{i}.md", key=f"dl_{i}")
@@ -425,6 +601,8 @@ def render_extras(i, m):
 
 
 def handle_turn(prompt, files):
+    if "_draft" in ss:
+        del ss["_draft"]
     with st.chat_message("user"):
         st.markdown(prompt)
         if files:
@@ -437,6 +615,7 @@ def handle_turn(prompt, files):
         try:
             # 에이전트 실행 상태 시각화
             with st.status("에이블이 생각하는 중...", expanded=True) as status:
+                st.write(f"🧠 사용 모델: {ss.settings['model']} ({model_id()})")
                 st.write("🔍 1단계: 요청 의도 파악")
                 recent = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in history[-4:])
                 r = route(f"[최근 대화]\n{recent}\n\n[현재 요청]\n{prompt}")
@@ -448,7 +627,7 @@ def handle_turn(prompt, files):
                     name, fn = TOOLS[intent]
                     st.write(f"🛠️ 2단계: {name} 실행")
                     result, table = fn(args)
-                    st.write(f"✅ {result.splitlines()[0]}")
+                    st.write(f"✅ {result.splitlines()[0][:120]}")
                     sys_c += f"\n\n[도구 실행 결과]\n{result}\n위 결과를 사용자에게 간결하게 보고하라."
                 elif intent == "translate":
                     sys_c += f"\n\n사용자가 번역을 요청했다. 대상 언어: {args.get('target_lang', '영어')}. 번역문을 먼저 제시하라."
@@ -464,19 +643,21 @@ def handle_turn(prompt, files):
                     st.write(f"📎 첨부 파일 {len(files)}개 분석")
                 status.update(label="분석 완료! 답변을 작성합니다.", state="complete", expanded=False)
 
+            vision = model_id() not in LEGACY_MODELS
             content = [{"type": "input_text", "text": prompt}]
             for f in files:
-                content += file_parts(f)
+                content += file_parts(f, vision)
             msgs = [{"role": "system", "content": sys_c}] + history + [{"role": "user", "content": content}]
             answer_ = st.write_stream(stream_llm(msgs))
         except Exception as e:
             # Error Fallback: 앱이 멈추지 않도록 안내 후 재시도 버튼 제공
             ss.messages.pop()
-            st.error(f"⚠️ 답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.\n\n`{e}`")
+            st.error(f"⚠️ 답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도하거나 다른 모델을 선택해 주세요.\n\n`{e}`")
             st.button("🔄 다시 시도", on_click=set_prompt, args=(prompt,), key="retry")
             return
 
-        msg = {"role": "assistant", "content": answer_ or "", "table": table}
+        msg = {"role": "assistant", "content": answer_ or "", "table": table,
+               "model": ss.settings["model"], "draft": ss.get("_draft")}
         ss.messages.append(msg)
         render_extras(len(ss.messages) - 1, msg)
         speak(answer_)
@@ -524,8 +705,9 @@ def page_home():
         if not urgent:
             st.caption("마감 임박 업무가 없습니다.")
 
-    st.subheader("📊 상태별 업무")
-    st.bar_chart(pd.DataFrame(ss.tasks)["상태"].value_counts())
+    if ss.tasks:
+        st.subheader("📊 상태별 업무")
+        st.bar_chart(pd.DataFrame(ss.tasks)["상태"].value_counts())
 
     st.subheader("🤖 AI 업무 브리핑")
     if st.button("오늘의 브리핑 받기"):
@@ -578,7 +760,7 @@ def page_chat():
     for col, qp in zip(cols, QUICK_PROMPTS):
         col.button(qp, key=f"qp_{qp}", on_click=set_prompt, args=(qp,))
 
-    prompt = st.chat_input("에이블에게 무엇이든 요청하세요")
+    prompt = st.chat_input("에이블에게 무엇이든 요청하세요 (예: 최 팀장님께 회의 일정 변경 메일 보내줘)")
 
     if ss.pending_prompt:
         prompt, ss.pending_prompt = ss.pending_prompt, None
@@ -631,9 +813,6 @@ def lib_attach(fid):
     ss.menu = "💬 채팅"
 
 
-LIB_DIR = "library"  # Colab에서는 /content/library
-
-
 def lib_import_folder():
     os.makedirs(LIB_DIR, exist_ok=True)
     n = 0
@@ -642,7 +821,7 @@ def lib_import_folder():
             with open(os.path.join(LIB_DIR, fn), "rb") as fp:
                 add_to_library(fn, fp.read(), "폴더")
             n += 1
-    ss.notice = f"📂 폴더에서 {n}개 파일을 불러왔습니다." if n else f"📂 '{LIB_DIR}' 폴더에 파일이 없습니다."
+    ss.notice = f"📂 폴더에서 {n}개 파일을 불러왔습니다." if n else f"⚠️ '{LIB_DIR}' 폴더에 파일이 없습니다."
 
 
 def lib_add_text():
@@ -661,9 +840,7 @@ def lib_add_text():
 
 def page_library():
     st.header("📁 자료실")
-    if ss.notice:
-        st.success(ss.notice)
-        ss.notice = ""
+    show_notice()
 
     tab1, tab2, tab3 = st.tabs(["⬆️ 파일 업로드", "📂 폴더에서 가져오기", "✍️ 텍스트 붙여넣기"])
     with tab1:
@@ -734,6 +911,9 @@ def page_my_tasks():
 
 def page_team():
     st.header("👥 팀 업무 현황")
+    if not ss.tasks:
+        st.info("등록된 업무가 없습니다.")
+        return
     df = pd.DataFrame(ss.tasks).drop(columns="id")
     owners = sorted(df["담당자"].unique())
     c1, c2 = st.columns(2)
@@ -749,7 +929,7 @@ def page_team():
 
 
 # ---------------------------------------------------------------------
-# 페이지: 이메일 관리
+# 페이지: 이메일 관리 (받은편지함 · 작성 · 보낸편지함 · 연락처)
 # ---------------------------------------------------------------------
 def draft_reply(mid):
     m = next(x for x in ss.inbox if x["id"] == mid)
@@ -777,22 +957,58 @@ def ai_compose():
         ss.notice = f"⚠️ AI 작성 실패: {e}"
 
 
+def pick_contact():
+    v = ss.mail_pick
+    if v != "직접 입력":
+        ss.mail_to = v.split("<")[-1].rstrip(">")
+
+
 def send_mail():
-    if not ss.mail_to or not ss.mail_subject:
-        ss.notice = "⚠️ 받는 사람과 제목을 입력해 주세요."
+    raw = ss.mail_to.strip()
+    c = find_contact(raw)
+    if c:
+        addr, name = c["이메일"], c["이름"]
+    elif EMAIL_RE.fullmatch(raw):
+        addr, name = raw, None
+    else:
+        ss.notice = "⚠️ 받는 사람을 연락처 이름이나 올바른 이메일 주소로 입력해 주세요."
         return
-    ss.sent.append({"받는 사람": ss.mail_to, "제목": ss.mail_subject, "본문": ss.mail_body,
-                    "발송 시각": datetime.now().strftime("%Y-%m-%d %H:%M")})
+    if not ss.mail_subject.strip():
+        ss.notice = "⚠️ 제목을 입력해 주세요."
+        return
+    try:
+        rec = deliver(addr, ss.mail_subject, ss.mail_body, name)
+    except Exception as e:
+        ss.notice = f"⚠️ 발송 실패: {e}"
+        return
     ss.mail_to = ss.mail_subject = ss.mail_body = ""
-    ss.notice = "📤 메일을 발송했습니다. (모의 발송)"
+    ss.notice = f"📤 {name or addr} <{addr}>에게 메일을 보냈습니다. ({rec['방식']})"
+
+
+def add_contact():
+    name, email = ss.ct_name.strip(), ss.ct_email.strip()
+    if not name or not EMAIL_RE.fullmatch(email):
+        ss.notice = "⚠️ 이름과 올바른 이메일 주소를 입력해 주세요."
+        return
+    upsert_contact(name, email, ss.ct_title.strip())
+    ss.ct_name = ss.ct_email = ss.ct_title = ""
+    ss.notice = f"📇 '{name}' 연락처를 저장했습니다."
+
+
+def delete_contact():
+    addr = ss.del_pick.split("<")[-1].rstrip(">")
+    ss.contacts = [c for c in ss.contacts if c["이메일"] != addr]
+    ss.notice = "🗑️ 연락처를 삭제했습니다."
 
 
 def page_email():
     st.header("📧 이메일 관리")
-    if ss.notice:
-        st.success(ss.notice)
-        ss.notice = ""
-    tab1, tab2, tab3 = st.tabs([f"📥 받은편지함 ({len(ss.inbox)})", "✍️ 메일 작성", f"📤 보낸편지함 ({len(ss.sent)})"])
+    show_notice()
+    user, pw, _, _ = smtp_conf()
+    st.caption("📮 발송 방식: " + (f"실제 발송 ({user})" if user and pw else "모의 발송 (설정 > 메일 발송에서 Gmail 연결 가능)"))
+
+    tab1, tab2, tab3, tab4 = st.tabs([f"📥 받은편지함 ({len(ss.inbox)})", "✍️ 메일 작성",
+                                      f"📤 보낸편지함 ({len(ss.sent)})", f"📇 연락처 ({len(ss.contacts)})"])
     with tab1:
         for m in ss.inbox:
             with st.expander(f"**{m['subject']}** — {m['from']} · {m['date']}"):
@@ -801,7 +1017,9 @@ def page_email():
                 c1.button("🤖 AI 답장 초안", key=f"rep_{m['id']}", on_click=draft_reply, args=(m["id"],))
                 c2.button("📌 업무로 등록", key=f"tsk_{m['id']}", on_click=mail_to_task, args=(m["id"],))
     with tab2:
-        st.text_input("받는 사람", key="mail_to")
+        picks = ["직접 입력"] + [f"{c['이름']} <{c['이메일']}>" for c in ss.contacts]
+        st.selectbox("📇 연락처에서 선택", picks, key="mail_pick", on_change=pick_contact)
+        st.text_input("받는 사람 (이메일 주소 또는 연락처 이름)", key="mail_to")
         st.text_input("제목", key="mail_subject")
         st.text_area("본문 (메모만 적고 AI 작성 도움을 눌러도 됩니다)", key="mail_body", height=250)
         c1, c2 = st.columns(2)
@@ -809,9 +1027,22 @@ def page_email():
         c2.button("📤 보내기", on_click=send_mail, type="primary")
     with tab3:
         if ss.sent:
-            st.dataframe(pd.DataFrame(ss.sent), hide_index=True)
+            st.dataframe(pd.DataFrame(ss.sent[::-1]), hide_index=True)
         else:
             st.caption("보낸 메일이 없습니다.")
+    with tab4:
+        if ss.contacts:
+            st.dataframe(pd.DataFrame(ss.contacts), hide_index=True)
+        st.markdown("**➕ 연락처 추가 / 수정** (같은 이메일이면 정보가 수정됩니다)")
+        c1, c2, c3 = st.columns(3)
+        c1.text_input("이름", key="ct_name", placeholder="예: 한 대리")
+        c2.text_input("이메일", key="ct_email", placeholder="예: han@company.com")
+        c3.text_input("직책", key="ct_title", placeholder="예: 대리")
+        st.button("📇 연락처 저장", on_click=add_contact)
+        if ss.contacts:
+            c4, c5 = st.columns([3, 1])
+            c4.selectbox("삭제할 연락처", [f"{c['이름']} <{c['이메일']}>" for c in ss.contacts], key="del_pick")
+            c5.button("🗑️ 삭제", on_click=delete_contact)
 
 
 # ---------------------------------------------------------------------
@@ -820,9 +1051,8 @@ def page_email():
 def page_settings():
     s = ss.settings
     st.header("⚙️ 설정")
-    if ss.notice:
-        st.success(ss.notice)
-        ss.notice = ""
+    show_notice()
+    models = list(MODEL_MAP)
     with st.form("settings_form"):
         st.subheader("👤 사용자 정보")
         c1, c2, c3 = st.columns(3)
@@ -831,9 +1061,10 @@ def page_settings():
         role = c3.text_input("직무", s["role"])
 
         st.subheader("🧠 AI 모델")
-        models = list(MODEL_MAP)
         model = st.selectbox("모델", models, index=models.index(s["model"]),
-                             help=" / ".join(f"{k} → {v}" for k, v in MODEL_MAP.items()))
+                             format_func=lambda k: f"{k}  ({MODEL_MAP[k]})")
+        st.caption("선택한 모델은 저장되어 다음에 접속해도 그대로 사용됩니다. "
+                   "GPT-4는 이미지·PDF를 직접 읽지 못하고 긴 대화에서 오류가 날 수 있습니다.")
         common = st.text_area("공통 프롬프트 (모든 답변에 적용)", s["common_prompt"],
                               placeholder="예: 답변은 항상 3줄 요약으로 시작해 주세요.")
 
@@ -845,10 +1076,18 @@ def page_settings():
         langs = {"한국어": "ko", "English": "en", "日本語": "ja"}
         lang = c7.selectbox("STT 언어", list(langs), index=list(langs.values()).index(s["stt_lang"]))
 
+        st.subheader("📮 메일 발송 (Gmail)")
+        st.caption("비워 두면 모의 발송합니다. 비밀번호는 저장 파일에 남지 않고 이번 접속에서만 쓰입니다.")
+        c8, c9 = st.columns(2)
+        smtp_user = c8.text_input("보내는 Gmail 주소", ss.smtp.get("user", ""))
+        smtp_pw = c9.text_input("Gmail 앱 비밀번호 (16자리)", ss.smtp.get("password", ""), type="password")
+
         if st.form_submit_button("💾 저장"):
             s.update({"name": name, "team": team, "role": role, "model": model, "common_prompt": common,
                       "voice": voice, "tts_on": tts_on, "autoplay": autoplay, "stt_lang": langs[lang]})
+            ss.smtp = {"user": smtp_user.strip(), "password": smtp_pw.replace(" ", "")}
             ss.notice = "설정이 저장되었습니다."
+            save_data()
             st.rerun()
 
     if st.button("🔊 목소리 미리 듣기"):
@@ -858,14 +1097,16 @@ def page_settings():
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동
 # ---------------------------------------------------------------------
+ss.sb_model = ss.settings["model"]  # 설정 화면과 사이드바 모델 선택을 맞춤
+
 with st.sidebar:
     st.markdown("## 🤖 에이블 (Able)")
     st.caption(f"{ss.settings['name']} · {ss.settings['team']}")
     st.button("➕ 새 대화", on_click=new_chat, type="primary")
     st.radio("메뉴", MENUS, key="menu", label_visibility="collapsed")
     st.divider()
-    st.caption(f"🧠 모델: {ss.settings['model']}")
-    st.caption(f"💬 대화 {len(ss.messages)}개 · 📁 자료 {len(ss.library)}개")
+    st.selectbox("🧠 AI 모델", list(MODEL_MAP), key="sb_model", on_change=change_model)
+    st.caption(f"💬 대화 {len(ss.messages)}개 · 📁 자료 {len(ss.library)}개 · 📇 연락처 {len(ss.contacts)}명")
 
 PAGES = {"🏠 홈": page_home, "💬 채팅": page_chat, "📁 자료실": page_library,
          "✅ 내 작업": page_my_tasks, "👥 팀 업무 현황": page_team,
@@ -873,3 +1114,4 @@ PAGES = {"🏠 홈": page_home, "💬 채팅": page_chat, "📁 자료실": page
 
 st.divider()
 PAGES[ss.menu]()
+save_data()
