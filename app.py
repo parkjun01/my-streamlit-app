@@ -68,10 +68,7 @@ if submit:
             input=input_messages
         )
         answer = response.output_text
-
-        # 응답 출력
-        st.subheader("AI 답변")
-        st.write(answer)
+        
        # [2단계 2번 수정] AI 답변 위에 음성 재생 플레이어 배치
         speech_response = client.audio.speech.create(
             model="tts-1",
