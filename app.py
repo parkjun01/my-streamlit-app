@@ -145,12 +145,12 @@ with st.sidebar:
 
 # 버튼을 눌렀거나 추천 질문 칩이 클릭되었을 때 실행
 if submit or st.session_state.preset_query:
-    # 업로드 된 파일이 있으면 디코딩
+    # 1. 업로드 된 파일이 있으면 디코딩
     text = ""
     if uploaded_file is not None:
         text = uploaded_file.read().decode("utf-8")
 
-    # 텍스트 소스 결정 (칩이 눌렸다면 칩의 내용, 아니면 녹음 확인)
+    # 2. 텍스트 소스 결정 (칩이 눌렸다면 칩의 내용, 아니면 녹음 확인)
     user_text = ""
     if st.session_state.preset_query:
         user_text = st.session_state.preset_query
@@ -166,39 +166,10 @@ if submit or st.session_state.preset_query:
         st.warning("음성을 녹음하시거나 추천 질문을 선택해주세요.")
         st.stop()
 
-    # 시스템 메시지 구성
-    system_content = sys_role
-    if text:
-        system_content += f"\n\n다음 내용을 참고하세요:\n{text}"
-    input_messages = [{"role": "system", "content": system_content}]
-    input_messages.append({"role": "user", "content": user_text})
-
-    # LLM 호출 및 응답 듣기 (정상적인 chat.completions 사용)
-    with st.spinner("답변을 준비하고 있습니다..."):
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=input_messages
-        )
-        answer = response.choices[0].message.content
-
-        # TTS 음성 재생 (AI 답변 상단 음성 플레이어 배치)
-        speech_response = client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=answer
-        )
-        audio_bytes = speech_response.read()
-        
-        st.caption("🔊 AI 비서 음성 답변")
-        st.audio(io.BytesIO(audio_bytes), format="audio/mp3", autoplay=False)
-        
-        st.subheader("AI 답변")
-        st.write(answer)
-# [3단계] 멀티턴 대화 히스토리 관리 (최근 10개 메시지 유지)
-   # 1. 사용자 메시지 세션에 추가
+    # 3. 사용자 메시지를 세션에 즉시 추가 (멀티턴 3단계)
     st.session_state.messages.append({"role": "user", "content": user_text})
 
-    # 2. 시스템 메시지 + 최근 10개 메시지만 슬라이싱하여 구성
+    # 4. 시스템 메시지 + 최근 10개 메시지만 슬라이싱하여 구성
     system_content = sys_role
     if text:
         system_content += f"\n\n다음 내용을 참고하세요:\n{text}"
@@ -206,7 +177,7 @@ if submit or st.session_state.preset_query:
     input_messages = [{"role": "system", "content": system_content}]
     input_messages.extend(st.session_state.messages[-10:])
 
-    # 3. LLM 호출 및 응답 받기
+    # 5. LLM 호출 및 응답 받기
     with st.spinner("답변을 준비하고 있습니다..."):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -214,10 +185,10 @@ if submit or st.session_state.preset_query:
         )
         answer = response.choices[0].message.content
 
-        # 4. 어시스턴트(AI) 응답도 세션에 추가
+        # 6. 어시스턴트(AI) 응답도 세션에 추가
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
-        # 5. TTS 음성 파일 생성 및 재생 플레이어 표시
+        # 7. TTS 음성 파일 생성 및 재생 플레이어 표시
         speech_response = client.audio.speech.create(
             model="tts-1",
             voice="alloy",
@@ -228,7 +199,5 @@ if submit or st.session_state.preset_query:
         st.caption("🔊 AI 비서 음성 답변")
         st.audio(io.BytesIO(audio_bytes), format="audio/mp3", autoplay=False)
         
-        # 6. 텍스트 중복 출력을 막기 위해 st.write(answer)는 제거하고 새로고침 실행
-        # (상단의 for문이 세션에 저장된 답변을 예쁘게 그려줍니다)
         st.subheader("AI 답변")
         st.write(answer)
