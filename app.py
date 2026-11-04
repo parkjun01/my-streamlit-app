@@ -230,4 +230,5 @@ if submit or st.session_state.preset_query:
         
         # 6. 텍스트 중복 출력을 막기 위해 st.write(answer)는 제거하고 새로고침 실행
         # (상단의 for문이 세션에 저장된 답변을 예쁘게 그려줍니다)
-        st.rerun()
+        st.subheader("AI 답변")
+        st.write(answer)
