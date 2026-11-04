@@ -72,12 +72,13 @@ if submit:
         # 응답 출력
         st.subheader("AI 답변")
         st.write(answer)
-        # [2단계 2번] LLM 최종 응답 음성 즉시 재생 (TTS)
-        # (※ 상단 임포트에 import io가 포함되어 있는지 확인해주세요)
+       # [2단계 2번] LLM 최종 응답 음성 즉시 재생 (TTS)
         speech_response = client.audio.speech.create(
-            model="tts-1", voice="alloy", input=answer
+            model="tts-1",
+            voice="alloy",
+            input=answer
         )
-        audio_bytes = speech_response.content
+        audio_bytes = speech_response.read()
         st.audio(io.BytesIO(audio_bytes), format="audio/mp3", autoplay=False)
         # =========================================================
 # [2단계 3번] 전문 AI 개인비서 UI/UX 구성 (사이드바 확장 및 퀵 프롬프트 칩)
