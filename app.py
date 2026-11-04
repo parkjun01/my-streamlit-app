@@ -3,7 +3,7 @@ import os
 import base64
 import json
 import requests
-import io 
+import io
 import streamlit as st
 from openai import OpenAI
 
@@ -1093,9 +1093,1051 @@ def page_settings():
     if st.button("🔊 목소리 미리 듣기"):
         speak(f"안녕하세요, {s['name']}님. 에이블입니다. 오늘도 함께 하겠습니다.", force=True)
 
+# =====================================================================
+#  [v4 추가] 위 코드는 그대로 두고, v4에만 있던 기능을 덧붙이는 부분
+#  (기존 함수는 지우지 않고 감싸서 기능을 더함)
+# =====================================================================
+import sqlite3
+import imaplib
+import email as email_lib
+from email.header import decode_header, make_header
+from email.utils import parseaddr
+import calendar as calendar_lib
+import html as html_lib
+import zipfile
+import hmac
+
+# ── 테마(Teal) ─────────────────────────────────────────────────────
+st.markdown("""<style>
+:root{--bg:#F2F7F7;--ink:#0F292A;--muted:#527072;--line:#E2ECEC;--accent:#0E7490}
+.stApp{background:var(--bg);color:var(--ink)}
+[data-testid="stSidebar"]{background:#EDF4F3;border-right:1px solid var(--line)}
+[data-testid="stChatMessage"]{background:#FFFFFF;border:1px solid var(--line);border-radius:14px;padding:1rem}
+[data-testid="stChatInput"]{border:1px solid #CBDDDD;border-radius:18px;background:white}
+.stButton>button,.stDownloadButton>button{border-radius:8px}
+.stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent)}
+.able-cal{width:100%;border-collapse:collapse;background:#FFFFFF;table-layout:fixed}
+.able-cal th{padding:.5rem;color:#527072;font-weight:500}
+.able-cal td{vertical-align:top;height:80px;padding:.4rem;border:1px solid #E2ECEC}
+.able-cal small{display:block;font-size:.72rem;color:#0E7490;overflow-wrap:anywhere}
+.able-cal .today{background:#DDF0ED}
+</style>""", unsafe_allow_html=True)
+
+
+# ── 공통: 설정값 읽기 (Secrets → 환경 변수 → api_key.txt) ──────────────
+def get_secret(key, default=""):
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    if os.environ.get(key):
+        return os.environ[key]
+    try:
+        with open(KEY_FILE, encoding="utf-8") as fp:
+            for line in fp:
+                if "=" in line and line.split("=", 1)[0].strip() == key:
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return default
+
+
+# ── 1. 작업공간 비밀번호 잠금 (ABLE_ACCESS_PASSWORD가 있을 때만) ─────────
+ACCESS_PW = get_secret("ABLE_ACCESS_PASSWORD")
+if ACCESS_PW and not ss.get("authenticated"):
+    st.subheader("🔒 에이블 작업공간")
+    st.caption("대화·업무·메일을 보호하기 위해 비밀번호를 입력해 주세요.")
+    with st.form("able_login"):
+        _pw_in = st.text_input("작업공간 비밀번호", type="password")
+        if st.form_submit_button("들어가기"):
+            if hmac.compare_digest(_pw_in, ACCESS_PW):
+                ss.authenticated = True
+                st.rerun()
+            else:
+                st.error("비밀번호를 확인하세요.")
+    st.stop()
+
+
+# ── 2. 작업공간 영구 저장 (SQLite: 업무·일정·대화·자료실·검토함 등) ───────
+DB_FILE = get_secret("ABLE_DB", "able_workspace.sqlite3")
+WS_KEYS = ["tasks", "schedule", "messages", "conversations", "conv_id", "library",
+           "candidates", "changes", "mail_drafts"]
+
+
+def _enc(o):
+    if isinstance(o, (bytes, bytearray)):
+        return {"__b64__": base64.b64encode(bytes(o)).decode()}
+    if isinstance(o, datetime):
+        return {"__dt__": o.isoformat()}
+    if isinstance(o, date):
+        return {"__date__": o.isoformat()}
+    return str(o)
+
+
+def _dec(d):
+    if "__b64__" in d:
+        return base64.b64decode(d["__b64__"])
+    if "__date__" in d:
+        return date.fromisoformat(d["__date__"])
+    if "__dt__" in d:
+        return datetime.fromisoformat(d["__dt__"])
+    return d
+
+
+def ws_db():
+    con = sqlite3.connect(DB_FILE, timeout=15)
+    con.execute("CREATE TABLE IF NOT EXISTS able_state (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated TEXT)")
+    return con
+
+
+def ws_load():
+    try:
+        con = ws_db()
+        rows = con.execute("SELECT k, v FROM able_state").fetchall()
+        con.close()
+        return {k: json.loads(v, object_hook=_dec) for k, v in rows}
+    except Exception:
+        return {}
+
+
+def ws_save():
+    # 바뀐 항목만 저장
+    try:
+        last = ss.setdefault("_ws_last", {})
+        con = ws_db()
+        for k in WS_KEYS:
+            if k not in ss:
+                continue
+            raw = json.dumps(ss[k], ensure_ascii=False, default=_enc)
+            if last.get(k) == raw:
+                continue
+            con.execute("INSERT INTO able_state(k, v, updated) VALUES(?,?,?) "
+                        "ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated=excluded.updated",
+                        (k, raw, datetime.now().isoformat()))
+            last[k] = raw
+        con.commit()
+        con.close()
+    except Exception as e:
+        st.sidebar.caption(f"⚠️ 작업공간 저장 실패: {e}")
+
+
+for _k, _v in {"conversations": [], "conv_id": uuid.uuid4().hex, "candidates": [], "changes": [],
+               "mail_drafts": [], "last_error": None, "analysis_mode": "검색"}.items():
+    if _k not in ss:
+        ss[_k] = _v
+
+if "ws_loaded" not in ss:
+    _ws = ws_load()
+    for _k in WS_KEYS:
+        if _k in _ws:
+            ss[_k] = _ws[_k]
+    ss.ws_loaded = True
+
+for _k, _v in {"custom_model": "", "image_model": "gpt-image-1", "max_output": 4000,
+               "reasoning": "자동", "voice_mode": "자동 재생"}.items():
+    ss.settings.setdefault(_k, _v)
+
+
+# ── 3. 모델 직접 입력 · 출력 길이 · 추론 옵션 · 상세 오류 ────────────────
+MODEL_MAP["✏️ 직접 입력"] = ""
+if ss.settings.get("model") not in MODEL_MAP:
+    ss.settings["model"] = "Luna 6"
+
+_base_model_id = model_id
+
+
+def model_id():
+    if ss.settings.get("model") == "✏️ 직접 입력" and ss.settings.get("custom_model"):
+        return ss.settings["custom_model"]
+    return _base_model_id() or "gpt-4o-mini"
+
+
+def gen_options():
+    opts = {"max_output_tokens": int(ss.settings.get("max_output", 4000))}
+    if ss.settings.get("reasoning", "자동") != "자동":
+        opts["reasoning"] = {"effort": ss.settings["reasoning"]}
+    return opts
+
+
+def diagnostic(exc, stage="요청 처리"):
+    body = getattr(exc, "body", None)
+    msg, code, param = str(exc), None, None
+    if isinstance(body, dict):
+        b = body.get("error") if isinstance(body.get("error"), dict) else body
+        msg, code, param = b.get("message", msg), b.get("code"), b.get("param")
+    msg = re.sub(r"sk-[A-Za-z0-9_\-]+", "[키 숨김]", str(msg))
+    hints = {"invalid_api_key": "OpenAI API 키를 확인하세요.",
+             "model_not_found": "모델 이름과 이 계정의 모델 사용 권한을 확인하세요.",
+             "context_length_exceeded": "새 대화를 시작하거나 분석 범위를 '검색'으로 바꿔 주세요.",
+             "insufficient_quota": "API 결제·사용 한도를 확인하세요.",
+             "unsupported_parameter": "선택한 모델이 이 옵션을 지원하지 않습니다. 설정 > 고급 모델 설정에서 추론 옵션을 '자동'으로 바꿔 주세요."}
+    status = getattr(exc, "status_code", None)
+    hint = hints.get(code, "")
+    if status == 400 and not hint:
+        hint = "아래 param·message가 실제 실패 원인을 알려 줍니다."
+    return {"stage": stage, "type": type(exc).__name__, "status": status, "code": code, "param": param,
+            "message": msg[:1800], "hint": hint, "request_id": getattr(exc, "request_id", None)}
+
+
+def error_ui(info):
+    st.error(f"{info['stage']} · {info['type']}")
+    if info.get("hint"):
+        st.info(info["hint"])
+    with st.expander("상세 원인 보기", expanded=True):
+        st.write(info["message"])
+        st.caption(" · ".join(f"{k}: {info[k]}" for k in ["status", "code", "param", "request_id"] if info.get(k)))
+
+
+def stream_llm(messages):
+    # 기존 스트리밍에 출력 길이·추론 옵션과 상세 오류 기록을 더함
+    try:
+        stream = client.responses.create(model=model_id(), input=messages, stream=True, **gen_options())
+        for event in stream:
+            if event.type in ("response.output_text.delta", "response.refusal.delta"):
+                yield event.delta
+            elif event.type in ("response.failed", "response.incomplete"):
+                raise ValueError("응답이 완료되지 않았습니다.")
+    except Exception as e:
+        ss.last_error = diagnostic(e, "답변 생성")
+        raise
+
+
+# ── 4. 음성: 자동 재생 / 선택 재생 ──────────────────────────────────────
+_base_speak = speak
+
+
+def speak(text_, force=False):
+    if ss.settings.get("voice_mode") == "선택 재생" and not force:
+        return
+    _base_speak(text_, force)
+
+
+# ── 5. 파일 형식 확장 (PPTX·XLSX·TSV·LOG·음성 파일) + 표 기초 통계 ─────────
+AUDIO_EXT = ["mp3", "wav", "m4a", "webm", "ogg"]
+for _ext in ["pptx", "xlsx", "tsv", "json", "log"] + AUDIO_EXT:
+    if _ext not in CHAT_TYPES:
+        CHAT_TYPES.append(_ext)
+
+_base_extract = extract_text
+
+
+def extract_text(name, data):
+    ext = name.rsplit(".", 1)[-1].lower()
+    try:
+        if ext == "pptx":
+            from pptx import Presentation
+            lines = []
+            for i, slide in enumerate(Presentation(io.BytesIO(data)).slides):
+                lines.append(f"[슬라이드 {i + 1}]")
+                for sh in slide.shapes:
+                    if getattr(sh, "has_text_frame", False):
+                        lines.append(sh.text_frame.text)
+                    if getattr(sh, "has_table", False):
+                        lines += [" | ".join(c.text for c in row.cells) for row in sh.table.rows]
+            return "\n".join(lines)
+        if ext in ("xlsx", "csv", "tsv"):
+            if ext == "xlsx":
+                tables = pd.read_excel(io.BytesIO(data), sheet_name=None)
+            else:
+                tables = {"표": pd.read_csv(io.BytesIO(data), sep="\t" if ext == "tsv" else ",")}
+            out = ""
+            for sheet, df in tables.items():
+                out += f"\n[시트 {sheet}, {len(df)}행]\n" + df.to_csv(index=False)
+                num = df.select_dtypes(include="number")
+                if not num.empty:
+                    out += "\n[기초 통계]\n" + num.describe().to_string()
+            return out
+        if ext == "log":
+            return data.decode("utf-8", errors="ignore")
+        if ext in AUDIO_EXT:
+            return client.audio.transcriptions.create(model="whisper-1", file=(name, data)).text
+    except Exception:
+        pass
+    return _base_extract(name, data)
+
+
+# ── 6. 자료 분석 범위: 전체 / 검색 ─────────────────────────────────────
+_base_rag = rag_context
+
+
+def rag_context(query):
+    if ss.get("analysis_mode") == "전체":
+        docs = [f for f in ss.library if f["rag"] and f["text"]]
+        if docs:
+            text_ = "\n\n".join(f"[출처: {f['name']}]\n{f['text']}" for f in docs)
+            return text_[:45000], [f["name"] for f in docs]
+    return _base_rag(query)
+
+
+# ── 7. 대화 목록 (최근 대화 저장·전환·삭제) ─────────────────────────────
+def archive_current():
+    if not ss.messages:
+        return
+    title = next((m["content"][:26] for m in ss.messages if m["role"] == "user"), "대화")
+    for c in ss.conversations:
+        if c["id"] == ss.conv_id:
+            c.update(title=title, messages=ss.messages)
+            return
+    ss.conversations.append({"id": ss.conv_id, "title": title, "messages": ss.messages,
+                             "created": datetime.now().strftime("%m-%d %H:%M")})
+
+
+_base_new_chat = new_chat
+
+
+def new_chat():
+    archive_current()
+    _base_new_chat()
+    ss.conv_id = uuid.uuid4().hex
+
+
+def open_conv(cid):
+    archive_current()
+    c = next(x for x in ss.conversations if x["id"] == cid)
+    ss.messages, ss.conv_id = c["messages"], cid
+    ss.suggestions = []
+    ss.menu = "💬 채팅"
+
+
+def delete_conv(cid):
+    ss.conversations = [c for c in ss.conversations if c["id"] != cid]
+    if ss.conv_id == cid:
+        _base_new_chat()
+        ss.conv_id = uuid.uuid4().hex
+
+
+# ── 8. 업무 변경 기록 · 상태 보드 · 업무 후보 검토함 ────────────────────
+STATUS_LIST = ["대기", "진행 중", "완료", "취소"]
+
+
+def record_change(task, field, before, after):
+    if before != after:
+        ss.changes.append({"시각": datetime.now().strftime("%Y-%m-%d %H:%M"), "업무": task["업무"],
+                           "항목": field, "이전": str(before), "이후": str(after)})
+
+
+_base_toggle = toggle_task
+
+
+def toggle_task(tid):
+    t = next((x for x in ss.tasks if x["id"] == tid), None)
+    before = t["상태"] if t else None
+    _base_toggle(tid)
+    if t:
+        record_change(t, "상태", before, t["상태"])
+
+
+def board_set(tid, field, key):
+    t = next((x for x in ss.tasks if x["id"] == tid), None)
+    if t:
+        before = t[field]
+        t[field] = ss[key]
+        record_change(t, field, before, t[field])
+
+
+def board_delete(tid):
+    t = next((x for x in ss.tasks if x["id"] == tid), None)
+    if t:
+        record_change(t, "삭제", t["업무"], "삭제됨")
+        ss.tasks = [x for x in ss.tasks if x["id"] != tid]
+
+
+def task_board(tasks, prefix):
+    cols = st.columns(3)
+    for col, group in zip(cols, [["대기"], ["진행 중"], ["완료", "취소"]]):
+        with col:
+            st.markdown(f"**{' / '.join(group)}**")
+            for t in [x for x in tasks if x["상태"] in group]:
+                with st.container(border=True):
+                    st.markdown(f"**{t['업무']}**")
+                    st.caption(f"{t['담당자']} · {t['마감일']} ({dday(t['마감일'])}) · {t['우선순위']}")
+                    k, kd, kp = f"{prefix}_st_{t['id']}", f"{prefix}_due_{t['id']}", f"{prefix}_pr_{t['id']}"
+                    ss[k], ss[kd], ss[kp] = t["상태"], t["마감일"], t["우선순위"]  # 다른 화면에서 바뀐 값과 맞춤
+                    st.selectbox("상태", STATUS_LIST, key=k, on_change=board_set, args=(t["id"], "상태", k),
+                                 label_visibility="collapsed")
+                    with st.expander("✏️ 수정"):
+                        st.date_input("마감일", key=kd, on_change=board_set, args=(t["id"], "마감일", kd))
+                        st.selectbox("우선순위", ["높음", "보통", "낮음"], key=kp, on_change=board_set,
+                                     args=(t["id"], "우선순위", kp))
+                        st.button("🗑️ 업무 삭제", key=f"{prefix}_del_{t['id']}", on_click=board_delete, args=(t["id"],))
+                        st.button("💬 이 업무로 대화하기", key=f"{prefix}_chat_{t['id']}", on_click=go,
+                                  args=("💬 채팅", f"'{t['업무']}' 업무(담당 {t['담당자']}, 마감 {t['마감일']})를 어떻게 진행하면 좋을지 단계별로 알려줘"))
+
+
+def extract_candidates(prompt, files):
+    # 회의록 등 자료에서 담당자별 업무 후보를 뽑아 검토함에 저장
+    docs = list(files) + [f for f in ss.library if f["rag"] and f["text"] and f not in files]
+    sources = {f["name"]: f["text"] for f in docs if f.get("text")}
+    if not sources:
+        return 0
+    context = "\n\n".join(f"[파일 {n}]\n{t}" for n, t in sources.items())[:30000]
+    sysmsg = ('자료에서 담당자에게 배정된 업무를 모두 찾아 JSON으로만 답하라. 없는 담당자·날짜를 만들지 마라. '
+              '기한이 불확실하면 due는 빈 문자열. quote는 근거가 되는 원문을 그대로 짧게 인용. '
+              '형식: {"tasks": [{"title": "", "owner": "", "due": "YYYY-MM-DD 또는 빈 문자열", '
+              '"priority": "높음|보통|낮음", "source": "파일명", "quote": ""}]}')
+    try:
+        out = parse_json(llm([{"role": "system", "content": sysmsg + f"\n오늘 날짜: {TODAY}"},
+                              {"role": "user", "content": f"요청: {prompt}\n\n{context}"}], json_mode=True))
+    except Exception:
+        return 0
+    norm = lambda x: re.sub(r"\s+", "", str(x))
+    n = 0
+    for t in out.get("tasks", [])[:30]:
+        if not t.get("title"):
+            continue
+        raw = sources.get(t.get("source", ""), " ".join(sources.values()))
+        t.update(id=uuid.uuid4().hex[:8], verified=bool(t.get("quote") and norm(t["quote"]) in norm(raw)))
+        ss.candidates.append(t)
+        n += 1
+    return n
+
+
+def accept_candidate(cid):
+    c = next(x for x in ss.candidates if x["id"] == cid)
+    has_due = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(c.get("due", ""))))
+    t = {"id": uuid.uuid4().hex[:8], "업무": c["title"] + ("" if has_due else " (기한 미정)"),
+         "담당자": c.get("owner") or ss.settings["name"],
+         "마감일": to_date(c["due"]) if has_due else TODAY + timedelta(days=7), "상태": "대기",
+         "우선순위": c.get("priority") if c.get("priority") in ("높음", "보통", "낮음") else "보통"}
+    ss.tasks.append(t)
+    record_change(t, "등록", "-", f"검토함에서 반영 (근거: {c.get('source', '')})")
+    ss.candidates = [x for x in ss.candidates if x["id"] != cid]
+
+
+def reject_candidate(cid):
+    ss.candidates = [x for x in ss.candidates if x["id"] != cid]
+
+
+def candidates_ui():
+    if not ss.candidates:
+        st.caption("검토할 업무가 없습니다. 채팅에서 회의록을 첨부하고 '담당자별 업무 정리해줘'라고 요청해 보세요.")
+    for c in ss.candidates:
+        with st.expander(f"{c['title']} · {c.get('owner') or '담당자 미정'}"):
+            st.caption(f"기한: {c.get('due') or '미정'} · 우선순위: {c.get('priority', '보통')} · 근거 파일: {c.get('source', '')}")
+            st.code(c.get("quote", ""), language=None)
+            st.caption("✅ 원문과 일치하는 근거 확인됨" if c.get("verified") else "⚠️ 원문 일치 미확인 · 자료를 직접 확인해 주세요.")
+            ok = st.checkbox("원문과 담당자·기한을 확인했습니다", key=f"cand_ok_{c['id']}")
+            a, b = st.columns(2)
+            a.button("✅ 업무에 반영", key=f"cand_acc_{c['id']}", on_click=accept_candidate, args=(c["id"],), disabled=not ok)
+            b.button("❌ 제외", key=f"cand_rej_{c['id']}", on_click=reject_candidate, args=(c["id"],))
+
+
+def changes_ui():
+    if ss.changes:
+        st.dataframe(pd.DataFrame(ss.changes[::-1][:50]), hide_index=True)
+    else:
+        st.caption("아직 변경 기록이 없습니다.")
+
+
+_base_page_my_tasks = page_my_tasks
+
+
+def page_my_tasks():
+    for t in ss.tasks:  # 보드에서 바꾼 상태가 체크리스트에도 보이도록 맞춤
+        if f"chk_{t['id']}" in ss and ss[f"chk_{t['id']}"] != (t["상태"] == "완료"):
+            del ss[f"chk_{t['id']}"]
+    _base_page_my_tasks()
+    st.divider()
+    mine = [t for t in ss.tasks if t["담당자"] == ss.settings["name"]]
+    t1, t2, t3 = st.tabs(["📋 상태 보드", f"📥 검토함 ({len(ss.candidates)})", "🕘 변경 기록"])
+    with t1:
+        task_board(mine, "my")
+    with t2:
+        candidates_ui()
+    with t3:
+        changes_ui()
+
+
+_base_page_team = page_team
+
+
+def page_team():
+    _base_page_team()
+    if not ss.tasks:
+        return
+    st.divider()
+    st.subheader("📋 담당자별 상태 보드")
+    owner = st.selectbox("보드에 표시할 담당자", ["전체"] + sorted({t["담당자"] for t in ss.tasks}), key="team_board_owner")
+    task_board([t for t in ss.tasks if owner == "전체" or t["담당자"] == owner], "team")
+
+
+# ── 9. 홈: 월간 달력 · 일정 편집(겹침 확인) · 기한 초과 ──────────────────
+def _minutes(hhmm):
+    h, m = map(int, hhmm.split(":"))
+    return h * 60 + m
+
+
+def find_conflicts(day, start, dur, skip_idx=None):
+    s, e = _minutes(start), _minutes(start) + dur
+    out = []
+    for i, ev in enumerate(ss.schedule):
+        if i == skip_idx or ev["일자"] != day:
+            continue
+        es = _minutes(ev["시간"])
+        if es < e and es + int(ev.get("소요", 60)) > s:
+            out.append(ev["일정"])
+    return out
+
+
+def calendar_ui():
+    st.subheader("🗓️ 월간 달력 (일정 + 업무 기한)")
+    anchor = st.date_input("표시할 월", TODAY.replace(day=1), key="cal_month")
+    cells = {}
+    for t in ss.tasks:
+        if t["상태"] not in ("완료", "취소"):
+            cells.setdefault(t["마감일"], []).append("⏰ " + t["업무"])
+    for ev in ss.schedule:
+        cells.setdefault(ev["일자"], []).append(f"{ev['시간']} {ev['일정']}")
+    table = '<table class="able-cal"><thead><tr>' + "".join(f"<th>{d}</th>" for d in "월화수목금토일") + "</tr></thead><tbody>"
+    for week in calendar_lib.Calendar().monthdatescalendar(anchor.year, anchor.month):
+        table += "<tr>"
+        for d in week:
+            items = "".join(f"<small>{html_lib.escape(x)}</small>" for x in cells.get(d, [])[:3])
+            more = f"<small>+{len(cells[d]) - 3}건</small>" if len(cells.get(d, [])) > 3 else ""
+            table += f'<td class="{"today" if d == TODAY else ""}"><b>{d.day}</b>{items}{more}</td>'
+        table += "</tr>"
+    st.markdown(table + "</tbody></table>", unsafe_allow_html=True)
+
+
+def save_event():
+    title, day = ss.ev_title.strip(), ss.ev_day
+    start, dur = ss.ev_time.strftime("%H:%M"), int(ss.ev_dur)
+    idx = None if ss.ev_pick == "새 일정" else int(ss.ev_pick.split(":")[0])
+    if not title:
+        ss.notice = "⚠️ 일정 제목을 입력하세요."
+        return
+    clash = find_conflicts(day, start, dur, idx)
+    if clash and not ss.ev_allow:
+        ss.notice = f"⚠️ 겹치는 일정: {', '.join(clash)}. 시간을 바꾸거나 '겹쳐도 저장'을 선택하세요."
+        return
+    ev = {"일자": day, "시간": start, "일정": title, "소요": dur}
+    if idx is None:
+        ss.schedule.append(ev)
+    else:
+        ss.schedule[idx] = ev
+    ss.notice = f"📅 '{title}' 일정을 저장했습니다."
+
+
+def delete_event():
+    if ss.ev_pick != "새 일정":
+        ev = ss.schedule.pop(int(ss.ev_pick.split(":")[0]))
+        ss.notice = f"🗑️ '{ev['일정']}' 일정을 삭제했습니다."
+        ss.ev_pick = "새 일정"
+
+
+def load_event():
+    if ss.ev_pick == "새 일정":
+        ss.ev_title, ss.ev_day, ss.ev_dur = "", TODAY, 60
+        return
+    ev = ss.schedule[int(ss.ev_pick.split(":")[0])]
+    ss.ev_title, ss.ev_day = ev["일정"], ev["일자"]
+    ss.ev_time = datetime.strptime(ev["시간"], "%H:%M").time()
+    ss.ev_dur = int(ev.get("소요", 60))
+
+
+def event_editor():
+    st.subheader("✏️ 일정 편집")
+    picks = ["새 일정"] + [f"{i}: {e['일자']} {e['시간']} {e['일정']}" for i, e in enumerate(ss.schedule)]
+    if ss.get("ev_pick") not in picks:
+        ss.ev_pick = "새 일정"
+    st.selectbox("편집할 일정", picks, key="ev_pick", on_change=load_event)
+    ss.setdefault("ev_title", "")
+    ss.setdefault("ev_day", TODAY)
+    ss.setdefault("ev_time", datetime.strptime("10:00", "%H:%M").time())
+    ss.setdefault("ev_dur", 60)
+    st.text_input("일정 제목", key="ev_title")
+    a, b, c = st.columns(3)
+    a.date_input("날짜", key="ev_day")
+    b.time_input("시작", key="ev_time", step=1800)
+    c.number_input("소요 시간(분)", min_value=15, max_value=720, step=15, key="ev_dur")
+    st.checkbox("시간이 겹치는 일정이 있어도 저장", key="ev_allow")
+    x, y = st.columns(2)
+    x.button("💾 일정 저장", on_click=save_event, type="primary")
+    y.button("🗑️ 선택한 일정 삭제", on_click=delete_event, disabled=ss.ev_pick == "새 일정")
+
+
+_base_page_home = page_home
+
+
+def page_home():
+    _base_page_home()
+    overdue = [t for t in ss.tasks if t["상태"] not in ("완료", "취소") and t["마감일"] < TODAY]
+    st.divider()
+    show_notice()
+    if overdue:
+        st.subheader(f"⚠️ 기한 초과 업무 {len(overdue)}건")
+        for t in sorted(overdue, key=lambda x: x["마감일"]):
+            st.markdown(f"**[{dday(t['마감일'])}]** {t['업무']} · {t['담당자']} · {t['상태']}")
+    calendar_ui()
+    event_editor()
+
+
+# ── 10. 결과 파일 생성 (TXT·MD·JSON·CSV·XLSX·DOCX·PPTX·PDF·PNG·MP3) ──────
+FILE_FORMATS = ["txt", "md", "json", "csv", "xlsx", "docx", "pptx", "pdf", "png", "mp3"]
+WANTS_FILE_RE = re.compile(r"(파일|엑셀|xlsx|csv|pdf|ppt|pptx|docx|워드|문서|보고서|이미지|그림|mp3|음성 ?파일|표).{0,15}"
+                           r"(만들|생성|저장|뽑|그려|변환|작성|내보내)|(만들|생성|그려).{0,6}(파일|이미지|그림)", re.I)
+PLAN_PROMPT = """사용자가 실제로 파일 생성을 원할 때만 files에 넣어 JSON으로만 답하라. 최대 3개.
+format은 txt|md|json|csv|xlsx|docx|pptx|pdf|png|mp3 중 하나. content는 문자열.
+- txt/md/docx/pdf: 본문(제목 줄은 '# '로 시작)
+- json: 올바른 JSON 문자열
+- csv/xlsx: {"columns": ["열"], "rows": [["값"]]} 형태의 JSON 문자열
+- pptx: {"slides": [{"title": "제목", "bullets": ["요점"]}]} 형태의 JSON 문자열
+- png: 이미지 생성용 프롬프트 / mp3: 읽을 원고(4000자 이내)
+형식: {"files": [{"name": "파일이름", "format": "xlsx", "content": "..."}]}"""
+
+
+def _table_df(content):
+    data = json.loads(content)
+    df = pd.DataFrame(data["rows"], columns=data["columns"])
+    # 엑셀 수식 실행 방지
+    return df.map(lambda v: "'" + v if isinstance(v, str) and v[:1] in "=+-@" else v)
+
+
+def _pdf_font():
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    for p in ["/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "C:/Windows/Fonts/malgun.ttf"]:
+        if os.path.isfile(p):
+            if "AbleKorean" not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont("AbleKorean", p))
+            return "AbleKorean"
+    pdfmetrics.registerFont(UnicodeCIDFont("HYSMyeongJo-Medium"))
+    return "HYSMyeongJo-Medium"
+
+
+def make_file(item):
+    fmt = item.get("format", "txt")
+    content = str(item.get("content", ""))
+    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(item.get("name") or "result")).rsplit(".", 1)[0][:60] or "result"
+    if fmt not in FILE_FORMATS or not content.strip():
+        raise ValueError("만들 내용이 비어 있거나 지원하지 않는 형식입니다.")
+    buf = io.BytesIO()
+    if fmt in ("txt", "md"):
+        buf.write(content.encode("utf-8"))
+    elif fmt == "json":
+        buf.write(json.dumps(json.loads(content), ensure_ascii=False, indent=2).encode("utf-8"))
+    elif fmt == "csv":
+        buf.write(_table_df(content).to_csv(index=False).encode("utf-8-sig"))
+    elif fmt == "xlsx":
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            _table_df(content).to_excel(w, index=False, sheet_name="결과")
+    elif fmt == "docx":
+        import docx
+        d = docx.Document()
+        for line in content.splitlines():
+            if line.startswith("# "):
+                d.add_heading(line[2:], level=1)
+            elif line.startswith("## "):
+                d.add_heading(line[3:], level=2)
+            else:
+                d.add_paragraph(line)
+        d.save(buf)
+    elif fmt == "pptx":
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        prs = Presentation()
+        prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+        for spec in json.loads(content)["slides"]:
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            head = slide.shapes.add_textbox(Inches(.6), Inches(.4), Inches(12), Inches(1.2)).text_frame
+            head.word_wrap, head.text = True, str(spec.get("title", ""))
+            head.paragraphs[0].font.size, head.paragraphs[0].font.bold = Pt(28), True
+            body = slide.shapes.add_textbox(Inches(.7), Inches(1.8), Inches(12), Inches(5)).text_frame
+            body.word_wrap = True
+            for j, bullet in enumerate(spec.get("bullets", [])[:6]):
+                p = body.paragraphs[0] if j == 0 else body.add_paragraph()
+                p.text, p.font.size = "• " + str(bullet), Pt(18)
+        prs.save(buf)
+    elif fmt == "pdf":
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import ParagraphStyle
+        font = _pdf_font()
+        body = ParagraphStyle("b", fontName=font, fontSize=11, leading=18, wordWrap="CJK")
+        head = ParagraphStyle("h", parent=body, fontSize=17, leading=24, spaceAfter=10)
+        story = [Paragraph(html_lib.escape(l.lstrip("# ")), head if l.startswith("#") else body) if l.strip()
+                 else Spacer(1, 8) for l in content.splitlines()]
+        SimpleDocTemplate(buf).build(story)
+    elif fmt == "png":
+        r = client.images.generate(model=ss.settings.get("image_model") or "gpt-image-1", prompt=content,
+                                   size="1024x1024", n=1)
+        buf.write(base64.b64decode(r.data[0].b64_json))
+    elif fmt == "mp3":
+        buf.write(client.audio.speech.create(model=TTS_MODEL, voice=ss.settings["voice"], input=content[:4000]).content)
+    return f"{stem}.{fmt}", buf.getvalue()
+
+
+def create_files(prompt, answer_):
+    made, errors = [], []
+    try:
+        plan = parse_json(llm([{"role": "system", "content": PLAN_PROMPT},
+                               {"role": "user", "content": f"요청: {prompt}\n\n답변: {answer_[:6000]}"}], json_mode=True))
+    except Exception as e:
+        return made, [f"파일 계획 실패: {e}"]
+    for item in plan.get("files", [])[:3]:
+        try:
+            name, data = make_file(item)
+            made.append(add_to_library(name, data, "생성")["id"])
+        except Exception as e:
+            errors.append(f"{item.get('name', '파일')}.{item.get('format', '')} 생성 실패: {e}")
+    return made, errors
+
+
+# ── 11. 채팅 화면 확장 (하단 입력창 파일·음성 첨부, 분석 범위, 답변별 도구) ──
+def to_mail(i):
+    m = ss.messages[i]
+    ss.mail_subject = "[에이블] 업무 처리 결과"
+    ss.mail_body = m["content"]
+    ss.mail_attach = list(m.get("outputs", []))
+    ss.menu = "📧 이메일 관리"
+    ss.notice = "📧 답변을 메일 초안으로 옮겼습니다. 아래 '자료실 파일 첨부해서 보내기'에서 첨부도 고를 수 있습니다."
+
+
+def render_more(i, m):
+    for fid in m.get("outputs", []):
+        f = next((x for x in ss.library if x["id"] == fid), None)
+        if not f:
+            continue
+        if f["name"].lower().endswith(".png"):
+            st.image(f["data"])
+        st.download_button(f"📄 {f['name']}", f["data"], file_name=f["name"], key=f"out_{i}_{fid}")
+    for w in m.get("warnings", []):
+        st.warning(w)
+    a, b = st.columns(2)
+    if a.button("🔊 음성으로 듣기", key=f"listen_{i}"):
+        speak(m["content"], force=True)
+    b.button("📧 메일 초안으로", key=f"tomail_{i}", on_click=to_mail, args=(i,))
+
+
+def page_chat():
+    st.header("💬 채팅")
+    st.radio("자료 분석 범위", ["검색", "전체"], horizontal=True, key="analysis_mode",
+             help="검색: 질문과 관련된 부분만 참고 / 전체: RAG에 켜 둔 자료 전체(최대 4만 5천 자)를 참고")
+
+    for i, m in enumerate(ss.messages):
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+            if m["role"] == "assistant":
+                render_extras(i, m)
+                render_more(i, m)
+            elif m.get("files"):
+                st.caption("📎 " + ", ".join(m["files"]))
+
+    chat_area = st.container()
+
+    with st.expander("📎 파일 첨부 · 🎤 음성 입력", expanded=ss.open_tools):
+        ups = st.file_uploader("PDF, 이미지, 문서 파일을 끌어다 놓으세요", type=CHAT_TYPES,
+                               accept_multiple_files=True, key=f"chat_up_{ss.chat_key}")
+        audio = st.audio_input("마이크로 말씀하세요", key=f"chat_audio_{ss.chat_key}")
+    attached = [f for f in ss.library if f["id"] in ss.attach_ids]
+    if attached:
+        st.caption("📁 자료실에서 첨부됨: " + ", ".join(f["name"] for f in attached))
+
+    st.caption("⚡ 자주 쓰는 질문")
+    cols = st.columns(len(QUICK_PROMPTS))
+    for col, qp in zip(cols, QUICK_PROMPTS):
+        col.button(qp, key=f"qp_{qp}", on_click=set_prompt, args=(qp,))
+
+    sub = st.chat_input("메시지 입력 · ＋ 파일 첨부 · 🎤 음성 입력", accept_file="multiple",
+                        file_type=CHAT_TYPES, accept_audio=True)
+    prompt, sub_files, sub_audio = "", [], None
+    if isinstance(sub, str):
+        prompt = sub
+    elif sub is not None:
+        prompt = sub.text or ""
+        sub_files = list(sub.files or [])
+        sub_audio = getattr(sub, "audio", None)
+
+    if ss.pending_prompt and not prompt:
+        prompt, ss.pending_prompt = ss.pending_prompt, None
+    for au in [x for x in (sub_audio, audio) if x is not None]:
+        audio_bytes = au.getvalue()
+        h = hashlib.md5(audio_bytes).hexdigest()
+        if h != ss.last_audio:
+            ss.last_audio = h
+            try:
+                prompt = (prompt + "\n" + stt(audio_bytes)).strip()
+            except Exception as e:
+                error_ui(diagnostic(e, "음성 인식"))
+    if not prompt and sub_files:
+        prompt = "첨부 자료의 주요 내용과 확인할 사항을 정리해줘."
+
+    if prompt:
+        files = [add_to_library(u.name, u.getvalue(), "업로드") for u in list(ups or []) + sub_files]
+        files += [f for f in attached if f not in files]
+        ss.open_tools = False
+        ss.last_error = None
+        n_before = len(ss.messages)
+        with chat_area:
+            handle_turn(prompt, files)
+            if ss.last_error:
+                error_ui(ss.last_error)
+            last = ss.messages[-1] if len(ss.messages) == n_before + 2 else None
+            if last and ss.last_error is None:
+                warnings = []
+                if WANTS_FILE_RE.search(prompt):
+                    with st.spinner("요청한 결과 파일을 만들고 있습니다..."):
+                        last["outputs"], errs = create_files(prompt, last["content"])
+                    warnings += errs
+                if re.search(r"회의|업무|할 ?일|담당|기한", prompt):
+                    with st.spinner("자료에서 업무 후보를 찾고 있습니다..."):
+                        n = extract_candidates(prompt, files)
+                    if n:
+                        warnings.append(f"업무 후보 {n}건을 '내 작업 > 📥 검토함'에 저장했습니다. 근거를 확인한 뒤 반영하세요.")
+                last["warnings"] = warnings
+                if last.get("outputs") or warnings:
+                    render_more(len(ss.messages) - 1, last)
+        archive_current()
+
+    if ss.suggestions:
+        st.caption("💡 이어서 물어보기")
+        for j, sq in enumerate(ss.suggestions):
+            st.button(sq, key=f"sg_{j}", on_click=set_prompt, args=(sq,))
+
+
+# ── 12. 자료실 확장 (종류 필터 · 미리보기 · 관련 구간 검색) ─────────────
+_base_page_library = page_library
+
+
+def page_library():
+    _base_page_library()
+    if not ss.library:
+        return
+    st.divider()
+    st.subheader("👀 자료 미리보기")
+    kind = st.radio("자료 종류", ["전체", "첨부 원본", "생성 결과"], horizontal=True, key="lib_kind")
+    items = [f for f in ss.library if kind == "전체" or (kind == "생성 결과") == (f["source"] == "생성")]
+    if items:
+        pick = st.selectbox("자료 선택", [f["id"] for f in items], key="lib_preview",
+                            format_func=lambda x: next(f["name"] for f in items if f["id"] == x))
+        f = next(x for x in items if x["id"] == pick)
+        ext = f["name"].rsplit(".", 1)[-1].lower()
+        if ext in IMG_MIME:
+            st.image(f["data"])
+        elif ext in ("csv", "xlsx", "tsv"):
+            try:
+                df = pd.read_excel(io.BytesIO(f["data"])) if ext == "xlsx" else \
+                    pd.read_csv(io.BytesIO(f["data"]), sep="\t" if ext == "tsv" else ",")
+                st.dataframe(df.head(100), hide_index=True)
+                st.caption("처음 100행만 보여 줍니다.")
+            except Exception:
+                st.info("표 미리보기를 열지 못했습니다. 원본을 다운로드해 주세요.")
+        elif ext in AUDIO_EXT:
+            st.audio(f["data"])
+            if f["text"]:
+                st.text(f["text"][:3000])
+        elif f["text"]:
+            st.text(f["text"][:6000])
+            st.caption("최대 6,000자까지 보여 줍니다.")
+        else:
+            st.caption("이 형식은 미리보기가 없습니다. 원본을 다운로드해 주세요.")
+    else:
+        st.caption("해당 종류의 자료가 없습니다.")
+    st.subheader("🔎 관련 구간 검색")
+    q = st.text_input("찾을 내용", key="lib_passage_q", placeholder="예: 출시 일정, 예산, 담당자")
+    if q:
+        ctx, srcs = _base_rag(q)
+        if ctx:
+            for part in ctx.split("\n\n[출처: ")[:6]:
+                st.text(part if part.startswith("[출처") else "[출처: " + part)
+            st.button("💬 이 내용으로 질문하기", on_click=go, args=("💬 채팅", q), key="lib_passage_ask")
+        else:
+            st.caption("관련 구간이 없습니다. RAG가 켜져 있는지 확인해 주세요.")
+
+
+# ── 13. 이메일 확장 (Gmail 받은편지함 실제 조회 · 첨부 발송 · 초안 저장) ─
+def _decode(v):
+    try:
+        return str(make_header(decode_header(v or "")))
+    except Exception:
+        return v or ""
+
+
+def fetch_gmail(limit=10):
+    user, pw, _, _ = smtp_conf()
+    if not (user and pw):
+        ss.notice = "⚠️ Gmail 주소와 앱 비밀번호가 필요합니다. (api_key.txt 또는 설정)"
+        return
+    try:
+        box = imaplib.IMAP4_SSL("imap.gmail.com", timeout=20)
+        box.login(user, pw)
+        box.select("INBOX", readonly=True)
+        _, data = box.search(None, "ALL")
+        rows = []
+        for uid in data[0].split()[-limit:][::-1]:
+            _, msg_data = box.fetch(uid, "(RFC822)")
+            msg = email_lib.message_from_bytes(msg_data[0][1])
+            body = ""
+            for part in (msg.walk() if msg.is_multipart() else [msg]):
+                if part.get_content_type() == "text/plain" and not part.get_filename():
+                    body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="ignore")
+                    break
+            frm = _decode(msg.get("From"))
+            addr = parseaddr(frm)[1]
+            rows.append({"id": "g" + uid.decode(), "from": frm.split("<")[0].strip(' "') or addr, "addr": addr,
+                         "date": _decode(msg.get("Date"))[:25], "subject": _decode(msg.get("Subject")) or "(제목 없음)",
+                         "body": body[:5000] or "(본문 없음)"})
+        box.logout()
+        ss.inbox = rows + [m for m in ss.inbox if not m["id"].startswith("g")]
+        ss.notice = f"📥 Gmail에서 최근 메일 {len(rows)}통을 불러왔습니다."
+    except Exception as e:
+        ss.notice = f"⚠️ Gmail 조회 실패: {e} (Gmail 설정에서 IMAP 사용이 켜져 있는지 확인하세요)"
+
+
+def send_with_files():
+    raw = ss.mail_to.strip()
+    c = find_contact(raw)
+    addr, name = (c["이메일"], c["이름"]) if c else (raw, None)
+    if not EMAIL_RE.fullmatch(addr or ""):
+        ss.notice = "⚠️ 받는 사람을 연락처 이름이나 올바른 이메일 주소로 입력해 주세요."
+        return
+    if not ss.mail_subject.strip():
+        ss.notice = "⚠️ 제목을 입력해 주세요."
+        return
+    files = [f for f in ss.library if f["id"] in ss.get("mail_attach", [])]
+    if sum(f["size"] for f in files) > 15 * 1024 * 1024:
+        ss.notice = "⚠️ 첨부파일 합계는 15MB 이하만 보낼 수 있습니다."
+        return
+    user, pw, host, port = smtp_conf()
+    mode = "모의 발송"
+    try:
+        if user and pw:
+            msg = EmailMessage()
+            msg["From"], msg["To"], msg["Subject"] = user, addr, ss.mail_subject
+            msg.set_content(ss.mail_body)
+            for f in files:
+                import mimetypes
+                major, minor = (mimetypes.guess_type(f["name"])[0] or "application/octet-stream").split("/", 1)
+                msg.add_attachment(f["data"], maintype=major, subtype=minor, filename=f["name"])
+            with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+                server.login(user, pw)
+                server.send_message(msg)
+            mode = "실제 발송"
+    except Exception as e:
+        ss.notice = f"⚠️ 발송 실패: {e}"
+        return
+    ss.sent.append({"받는 사람": f"{name} <{addr}>" if name else addr, "제목": ss.mail_subject, "본문": ss.mail_body,
+                    "발송 시각": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "방식": mode + (f" · 첨부 {len(files)}개" if files else "")})
+    if not any(x["이메일"].lower() == addr.lower() for x in ss.contacts):
+        upsert_contact(name, addr)
+    ss.mail_to = ss.mail_subject = ss.mail_body = ""
+    ss.mail_attach = []
+    ss.notice = f"📤 {name or addr}에게 첨부 {len(files)}개와 함께 메일을 보냈습니다. ({mode})"
+
+
+def save_mail_draft():
+    if not (ss.mail_subject.strip() or ss.mail_body.strip()):
+        ss.notice = "⚠️ 저장할 제목이나 본문이 없습니다."
+        return
+    ss.mail_drafts.append({"id": uuid.uuid4().hex[:8], "to": ss.mail_to, "subject": ss.mail_subject or "(제목 없음)",
+                           "body": ss.mail_body, "attach": list(ss.get("mail_attach", [])),
+                           "saved": datetime.now().strftime("%m-%d %H:%M")})
+    ss.notice = "💾 메일 초안을 저장했습니다."
+
+
+def load_mail_draft():
+    d = next((x for x in ss.mail_drafts if x["id"] == ss.get("draft_pick")), None)
+    if d:
+        ss.mail_to, ss.mail_subject, ss.mail_body = d["to"], d["subject"], d["body"]
+        ss.mail_attach = [x for x in d["attach"] if any(f["id"] == x for f in ss.library)]
+        ss.notice = "📂 초안을 불러왔습니다. '메일 작성' 탭에서 확인하세요."
+
+
+_base_page_email = page_email
+
+
+def page_email():
+    _base_page_email()
+    st.divider()
+    with st.expander("📥 Gmail 받은편지함 불러오기"):
+        st.caption("api_key.txt(또는 설정)의 Gmail 주소·앱 비밀번호로 실제 받은편지함 최근 메일을 읽어 와 '받은편지함' 탭에 보여 줍니다.")
+        st.button("📥 최근 메일 10통 불러오기", on_click=fetch_gmail)
+    with st.expander("📎 자료실 파일 첨부해서 보내기", expanded=bool(ss.get("mail_attach"))):
+        st.caption("'메일 작성' 탭에 적은 받는 사람·제목·본문에 자료실 파일을 붙여 보냅니다.")
+        valid = [f["id"] for f in ss.library]
+        ss.mail_attach = [x for x in ss.get("mail_attach", []) if x in valid]
+        st.multiselect("첨부할 파일", valid, key="mail_attach",
+                       format_func=lambda x: next(f["name"] for f in ss.library if f["id"] == x))
+        st.button("📤 첨부해서 보내기", on_click=send_with_files, type="primary")
+    with st.expander(f"💾 메일 초안 저장·불러오기 ({len(ss.mail_drafts)})"):
+        st.button("💾 지금 작성 중인 메일을 초안으로 저장", on_click=save_mail_draft)
+        if ss.mail_drafts:
+            st.selectbox("저장된 초안", [d["id"] for d in ss.mail_drafts][::-1], key="draft_pick",
+                         format_func=lambda x: next(f"{d['saved']} · {d['subject']}" for d in ss.mail_drafts if d["id"] == x))
+            st.button("📂 초안 불러오기", on_click=load_mail_draft)
+
+
+# ── 14. 설정 확장 (고급 모델 · API 연결 확인 · 백업/복원 · 저장 안내) ──────
+def save_advanced():
+    s = ss.settings
+    s.update({"custom_model": ss.adv_custom.strip(), "image_model": ss.adv_image.strip() or "gpt-image-1",
+              "max_output": int(ss.adv_tokens), "reasoning": ss.adv_reason, "voice_mode": ss.adv_voice})
+    ss.notice = "고급 설정이 저장되었습니다."
+
+
+def backup_bytes():
+    data = {k: ss[k] for k in WS_KEYS + SAVE_KEYS if k in ss}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("workspace.json", json.dumps(data, ensure_ascii=False, default=_enc))
+    return buf.getvalue()
+
+
+def restore_backup():
+    up = ss.get("backup_up")
+    if not up:
+        ss.notice = "⚠️ 복원할 백업 ZIP을 먼저 선택하세요."
+        return
+    try:
+        with zipfile.ZipFile(io.BytesIO(up.getvalue())) as z:
+            data = json.loads(z.read("workspace.json"), object_hook=_dec)
+        for k, v in data.items():
+            if k in WS_KEYS + SAVE_KEYS:
+                ss[k] = v
+        ss.notice = "♻️ 백업을 복원했습니다."
+    except Exception as e:
+        ss.notice = f"⚠️ 복원 실패: {e}"
+
+
+_base_page_settings = page_settings
+
+
+def page_settings():
+    _base_page_settings()
+    s = ss.settings
+    st.divider()
+    with st.expander("🧠 고급 모델 설정"):
+        st.text_input("직접 입력 모델 ID (모델에서 '✏️ 직접 입력'을 골랐을 때 사용)", s["custom_model"], key="adv_custom",
+                      placeholder="예: gpt-4.1-nano")
+        st.text_input("이미지 생성 모델", s["image_model"], key="adv_image")
+        st.select_slider("최대 출력 토큰", [1000, 2000, 4000, 8000, 16000], value=int(s["max_output"]), key="adv_tokens")
+        opts = ["자동", "low", "medium", "high"]
+        st.selectbox("추론 옵션 (추론 모델에서만 사용)", opts, index=opts.index(s["reasoning"]) if s["reasoning"] in opts else 0,
+                     key="adv_reason", help="'자동'이면 추론 옵션을 보내지 않습니다. 일반 모델에서 다른 값을 고르면 오류가 날 수 있습니다.")
+        st.radio("답변 음성", ["자동 재생", "선택 재생"], index=0 if s["voice_mode"] == "자동 재생" else 1, key="adv_voice",
+                 horizontal=True, help="선택 재생: 답변마다 '🔊 음성으로 듣기'를 눌러야 소리가 납니다.")
+        st.button("💾 고급 설정 저장", on_click=save_advanced)
+    with st.expander("🔌 API 연결 확인"):
+        st.caption("실제 API에 짧은 테스트 요청을 보냅니다. 약간의 사용 요금이 발생할 수 있습니다.")
+        if st.button("대화 모델 연결 확인"):
+            try:
+                st.success(f"✅ {model_id()} 응답: " + llm([{"role": "user", "content": "'연결 확인'이라고만 답하세요."}]))
+            except Exception as e:
+                error_ui(diagnostic(e, "모델 연결 확인"))
+    with st.expander("💾 작업공간 백업·복원"):
+        st.download_button("⬇️ 백업 ZIP 다운로드", backup_bytes(), file_name="able_backup.zip")
+        st.file_uploader("백업 ZIP 선택", type=["zip"], key="backup_up")
+        st.button("♻️ 백업에서 복원", on_click=restore_backup)
+        st.caption("백업에는 대화·업무·일정·자료·연락처가 들어갑니다. API 키와 비밀번호는 들어가지 않습니다.")
+    with st.expander("ℹ️ 저장 방식 안내"):
+        st.write(f"작업공간 저장 파일: `{os.path.abspath(DB_FILE)}` (SQLite)")
+        st.caption("같은 서버에서는 새로고침·재접속해도 유지됩니다. Streamlit Cloud는 재배포·재시작 때 파일이 지워질 수 있으니 백업 ZIP을 받아 두세요.")
+
 
 # ---------------------------------------------------------------------
-# 사이드바 + 페이지 이동
+# 사이드바 + 페이지 이동 (v4: 최근 대화 목록 · 잠금 추가)
 # ---------------------------------------------------------------------
 ss.sb_model = ss.settings["model"]  # 설정 화면과 사이드바 모델 선택을 맞춤
 
@@ -1106,7 +2148,17 @@ with st.sidebar:
     st.radio("메뉴", MENUS, key="menu", label_visibility="collapsed")
     st.divider()
     st.selectbox("🧠 AI 모델", list(MODEL_MAP), key="sb_model", on_change=change_model)
-    st.caption(f"💬 대화 {len(ss.messages)}개 · 📁 자료 {len(ss.library)}개 · 📇 연락처 {len(ss.contacts)}명")
+    with st.expander(f"🕘 최근 대화 ({len(ss.conversations)})"):
+        for c in ss.conversations[::-1][:15]:
+            a, b = st.columns([5, 1])
+            a.button(c["title"], key=f"conv_{c['id']}", on_click=open_conv, args=(c["id"],))
+            b.button("✕", key=f"convdel_{c['id']}", on_click=delete_conv, args=(c["id"],))
+        if not ss.conversations:
+            st.caption("새 대화를 누르면 지금 대화가 여기에 저장됩니다.")
+    st.caption(f"💬 대화 {len(ss.messages)}개 · 📁 자료 {len(ss.library)}개 · 📇 연락처 {len(ss.contacts)}명 · 📥 검토 {len(ss.candidates)}건")
+    if ACCESS_PW and st.button("🔒 잠금"):
+        ss.authenticated = False
+        st.rerun()
 
 PAGES = {"🏠 홈": page_home, "💬 채팅": page_chat, "📁 자료실": page_library,
          "✅ 내 작업": page_my_tasks, "👥 팀 업무 현황": page_team,
@@ -1115,3 +2167,6 @@ PAGES = {"🏠 홈": page_home, "💬 채팅": page_chat, "📁 자료실": page
 st.divider()
 PAGES[ss.menu]()
 save_data()
+ws_save()
+
+
