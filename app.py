@@ -68,7 +68,7 @@ if submit:
             input=input_messages
         )
         answer = response.output_text
-        
+
        # [2단계 2번 수정] AI 답변 위에 음성 재생 플레이어 배치
         speech_response = client.audio.speech.create(
             model="tts-1",
@@ -123,3 +123,92 @@ with col3:
         preset_query = "주요 마케팅 지표 분석 및 전략 수립을 도와줘."
 
 st.markdown("")
+# =========================================================
+# [2단계 3번 확장] 자동 실행형 추천 질문 칩 (Quick Prompt Chips)
+# =========================================================
+st.markdown("💡 **자주 찾는 업무 및 추천 질문 (클릭 시 즉시 실행)**")
+col1, col2, col3 = st.columns(3)
+
+# 칩 클릭 상태를 저장할 키 초기화
+if "preset_query" not in st.session_state:
+    st.session_state.preset_query = ""
+
+with col1:
+    if st.button("📊 최근 마케팅 회의록 요약", use_container_width=True):
+        st.session_state.preset_query = "최근 마케팅 회의록을 분석하고 핵심 업무 지시사항을 요약해줘."
+        st.rerun() # 클릭 즉시 실행을 위해 새로고침
+with col2:
+    if st.button("✉️ 마케팅 콘텐츠 기획 지원", use_container_width=True):
+        st.session_state.preset_query = "데이터 기반의 새로운 마케팅 콘텐츠 기획 아이디어를 제안해줘."
+        st.rerun()
+with col3:
+    if st.button("📈 주요 마케팅 지표 분석 점검", use_container_width=True):
+        st.session_state.preset_query = "주요 마케팅 지표 분석 및 전략 수립을 도와줘."
+        st.rerun()
+
+st.markdown("")
+# 폼 입력 영역
+with st.form("task_form"):
+    uploaded_file = st.file_uploader("텍스트 파일 업로드", type=["txt"])
+    
+    # 칩이 선택되었다면 화면에 안내 표시
+    if st.session_state.preset_query:
+        st.info(f"선택된 추천 질문: '{st.session_state.preset_query}'")
+        
+    audio_value = st.audio_input("무엇을 도와드릴까요?")
+    submit = st.form_submit_button("실행")
+
+# [조건] 폼의 '실행' 버튼을 눌렀거나 OR '추천 질문 칩'이 클릭된 경우 모두 실행
+if submit or st.session_state.preset_query:
+    
+    # 업로드 된 파일 처리
+    text = ""
+    if uploaded_file is not None:
+        text = uploaded_file.read().decode("utf-8")
+
+    # 텍스트 소스 결정 (칩이 눌렸다면 칩의 내용, 아니면 녹음 확인)
+    user_text = ""
+    
+    if st.session_state.preset_query:
+        user_text = st.session_state.preset_query
+        # 사용 후 초기화하여 중복 실행 방지
+        st.session_state.preset_query = "" 
+    elif audio_value is not None:
+        # STT: 음성 → 텍스트
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=("audio.wav", audio_value, "audio/wav")
+        )
+        user_text = transcript.text
+    else:
+        st.warning("음성을 녹음하시거나 추천 질문을 선택해주세요.")
+        st.stop()
+
+    # 시스템 메시지 구성
+    system_content = sys_role
+    if text:
+        system_content += f"\n\n다음 내용을 참고하세요:\n{text}"
+    input_messages = [{"role": "system", "content": system_content}]
+    input_messages.append({"role": "user", "content": user_text})
+
+    # LLM 호출 및 응답
+    with st.spinner("답변을 준비하고 있습니다..."):
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=input_messages
+        )
+        answer = response.output_text
+
+        # TTS 음성 재생 (앞서 다듬은 플레이어 상단 배치 구조 적용)
+        speech_response = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=answer
+        )
+        audio_bytes = speech_response.read()
+        
+        st.caption("🔊 AI 비서 음성 답변")
+        st.audio(io.BytesIO(audio_bytes), format="audio/mp3", autoplay=False)
+        
+        st.subheader("AI 답변")
+        st.write(answer)
