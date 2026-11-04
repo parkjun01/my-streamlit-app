@@ -2269,6 +2269,36 @@ def page_team():
     owner = st.selectbox("상세를 볼 담당자", ["전체"] + sorted({t["담당자"] for t in ss.tasks}), key="team_detail_owner")
     for t in sorted([t for t in ss.tasks if owner == "전체" or t["담당자"] == owner], key=lambda x: x["마감일"]):
         task_detail(t, "teamdet")
+# ── 16. 메일 계정: Streamlit Cloud Secrets에 어떤 이름으로 저장했든 Gmail 주소·앱 비밀번호 찾기 ──
+_base_smtp_conf = smtp_conf
+_TO_KEY = re.compile(r"(^|[._])(to|recipient|receiver|받는)($|[._])", re.I)
+_PW_KEY = re.compile(r"pass|pw|pwd|비밀번호|app_?key|app_?code", re.I)
+
+
+def _secret_items():
+    # Secrets의 모든 값을 (이름, 값)으로 펼침. [gmail] 같은 묶음 안의 값도 포함
+    items = []
+    try:
+        for k, v in st.secrets.items():
+            if hasattr(v, "items"):
+                items += [(f"{k}.{k2}", v2) for k2, v2 in v.items()]
+            else:
+                items.append((k, v))
+    except Exception:
+        pass
+    return [(str(k), str(v).strip()) for k, v in items]
+
+
+def smtp_conf():
+    user, pw, host, port = _base_smtp_conf()
+    items = _secret_items()
+    if not user:
+        user = next((v for k, v in items if EMAIL_RE.fullmatch(v) and not _TO_KEY.search(k)), "")
+    if not pw:
+        pw = next((v for k, v in items if _PW_KEY.search(k) and "ACCESS" not in k.upper()
+                   and "OPENAI" not in k.upper() and not v.startswith("sk-")), "")
+    return user, pw.replace(" ", ""), host, port
+
 
 
 # ---------------------------------------------------------------------
