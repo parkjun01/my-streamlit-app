@@ -121,17 +121,6 @@ with col3:
 
 st.markdown("")
 
-# 2. 폼 입력 영역
-with st.form("task_form"):
-    uploaded_file = st.file_uploader("텍스트 파일 업로드", type=["txt"])
-    
-    # 칩이 선택되었다면 화면에 안내 표시
-    if st.session_state.preset_query:
-        st.info(f"선택된 추천 질문: '{st.session_state.preset_query}'")
-        
-    audio_value = st.audio_input("무엇을 도와드릴까요?")
-    submit = st.form_submit_button("실행")
-
 # 3. 사이드바 구성 (폼 아래에 배치하여 uploaded_file 변수 참조 오류 방지)
 with st.sidebar:
     st.markdown("### 🤖 비서 프로필")
