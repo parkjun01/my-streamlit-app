@@ -2947,8 +2947,8 @@ h2{font-size:1.55rem !important;letter-spacing:-.02em}
 .able-mini{width:100%;border-collapse:collapse;text-align:center;font-size:.86rem;border:none !important}
 .able-mini tr,.able-mini th,.able-mini td{border:none !important;background:transparent !important}
 .able-task{font-size:.92rem;padding-top:.15rem}
-[data-testid="stCheckbox"] label{align-items:center}
-[data-testid="stCheckbox"] label > span + div{width:1.05rem !important;height:1.05rem !important;min-height:0 !important;flex:none !important;border-radius:4px !important}
+[class*="st-key-home_chk_"] [data-testid="stCheckbox"] label{align-items:center}
+[class*="st-key-home_chk_"] [data-testid="stCheckbox"] label > span + div{width:1.05rem !important;height:1.05rem !important;min-height:0 !important;flex:none !important;border-radius:4px !important}
 .able-mini th{color:var(--muted);font-weight:500;padding:.25rem 0}
 .able-mini td{padding:.28rem 0;color:#3F3E3B}
 .able-mini td.out{color:#C9C6C0}
@@ -3421,7 +3421,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v6 · 2026-11-05 (Luna 6 실제 연결)")
+    st.caption("버전: v7 · 2026-11-05 (흰 화면 고정)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
