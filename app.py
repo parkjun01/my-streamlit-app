@@ -3267,6 +3267,114 @@ def base_system():
             "따로 만들어 답변 아래에 보여 준다. '그릴 수 없다'고 하지 말고, 어떤 이미지를 만들지 1~2문장으로 짧게 설명하라.")
 
 
+# ── 30. Luna 6을 실제 모델(gpt-6-luna)로 연결 ─────────────────────────────────
+#   공식 문서 기준: Responses API·스트리밍 지원, 입력은 글자·이미지(PDF 원본 X),
+#   추론(reasoning) 토큰도 출력 한도에 포함됨
+LUNA_ID = "gpt-6-luna"
+FALLBACK_MODEL = "gpt-4o-mini"
+_rest = {k: v for k, v in MODEL_MAP.items() if k != "Luna 6"}
+MODEL_MAP.clear()
+MODEL_MAP.update({"Luna 6": LUNA_ID, "GPT-4o mini": FALLBACK_MODEL})
+MODEL_MAP.update({k: v for k, v in _rest.items() if k != "GPT-4o mini"})
+NO_PDF_MODELS = {LUNA_ID}
+
+
+def _access_error(e):
+    body = getattr(e, "body", None)
+    code = getattr(e, "code", None) or (body.get("code") if isinstance(body, dict) else None)
+    return getattr(e, "status_code", None) in (403, 404) or code in ("model_not_found", "permission_denied")
+
+
+def _out_tokens(model):
+    n = int(ss.settings.get("max_output", 4000))
+    return max(n, 16000) if model == LUNA_ID else n  # 추론 모델은 생각하는 데도 토큰을 써서 넉넉하게
+
+
+def _call(model, messages, fmt):
+    kw = {"model": model, "input": messages}
+    if fmt:
+        kw["text"] = {"format": {"type": "json_object"}}
+    return client.responses.create(**kw).output_text
+
+
+NO_JSON_MODELS = set()     # JSON 모드를 거절한 모델 (다음부터 형식 지정 없이 요청)
+NO_ACCESS_MODELS = set()   # 이 API 키로 쓸 수 없던 모델 (다음부터 바로 대체 모델 사용)
+
+
+def _usable(model):
+    if model in NO_ACCESS_MODELS:
+        ss.model_note = f"⚠️ 이 API 키로는 {model} 모델을 쓸 수 없어 {FALLBACK_MODEL}로 대신 답했습니다."
+        return FALLBACK_MODEL
+    return model
+
+
+def llm(messages, json_mode=False):
+    model = _usable(model_id())
+    use_fmt = json_mode and model not in LEGACY_MODELS and model not in NO_JSON_MODELS
+    try:
+        return _call(model, messages, use_fmt)
+    except Exception as e:
+        if _access_error(e) and model != FALLBACK_MODEL:
+            NO_ACCESS_MODELS.add(model)
+            ss.model_note = f"⚠️ 이 API 키로는 {model} 모델을 쓸 수 없어 {FALLBACK_MODEL}로 대신 답했습니다."
+            return _call(FALLBACK_MODEL, messages, json_mode)
+        if use_fmt:  # JSON 모드를 지원하지 않는 모델이면 형식 지정 없이 다시 요청
+            NO_JSON_MODELS.add(model)
+            return _call(model, messages, False)
+        raise
+
+
+def _stream(model, messages, with_reasoning):
+    kw = {"model": model, "input": messages, "stream": True, "max_output_tokens": _out_tokens(model)}
+    if with_reasoning and ss.settings.get("reasoning", "자동") != "자동":
+        kw["reasoning"] = {"effort": ss.settings["reasoning"]}
+    for event in client.responses.create(**kw):
+        if event.type in ("response.output_text.delta", "response.refusal.delta"):
+            yield event.delta
+        elif event.type in ("response.failed", "response.incomplete"):
+            raise ValueError("응답이 완료되지 않았습니다. 설정 > 고급 모델 설정에서 최대 출력 토큰을 늘려 보세요.")
+
+
+def stream_llm(messages):
+    model = _usable(model_id())
+    try:
+        yield from _stream(model, messages, model != FALLBACK_MODEL or model_id() == FALLBACK_MODEL)
+    except Exception as e:
+        if _access_error(e) and model != FALLBACK_MODEL:
+            NO_ACCESS_MODELS.add(model)
+            ss.model_note = f"⚠️ 이 API 키로는 {model} 모델을 쓸 수 없어 {FALLBACK_MODEL}로 대신 답했습니다."
+            try:
+                yield from _stream(FALLBACK_MODEL, messages, False)
+                return
+            except Exception as e2:
+                e = e2
+        ss.last_error = diagnostic(e, "답변 생성")
+        raise
+
+
+_v29_file_parts = file_parts
+
+
+def file_parts(f, vision=True):
+    # Luna 6은 PDF 원본을 받지 않으므로 뽑아 둔 글자로 전달
+    if model_id() in NO_PDF_MODELS and f["name"].lower().endswith(".pdf"):
+        if f["text"]:
+            return [{"type": "input_text", "text": f"[첨부: {f['name']}]\n" + f["text"][:15000]}]
+        return [{"type": "input_text", "text": f"[첨부: {f['name']}] (글자를 읽을 수 없는 PDF입니다. 스캔본이면 이미지로 첨부해 주세요)"}]
+    return _v29_file_parts(f, vision)
+
+
+_v29_render_more = render_more
+
+
+def render_more(i, m):
+    if ss.get("model_note") and i == len(ss.messages) - 1 and m.get("role") == "assistant":
+        m["model_note"] = ss.pop("model_note")
+    if m.get("model_note"):
+        st.caption(m["model_note"])
+    _v29_render_more(i, m)
+
+
 # ── 29. AI 모델 목록에서 같은 모델이 두 번 나오지 않게 정리 ─────────────────────
 _seen_models = {}
 for _name in list(MODEL_MAP):
@@ -3313,7 +3421,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v5 · 2026-11-05 (새 디자인·로그인·이미지 생성)")
+    st.caption("버전: v6 · 2026-11-05 (Luna 6 실제 연결)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
