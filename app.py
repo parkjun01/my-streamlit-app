@@ -3389,6 +3389,180 @@ if ss.settings.get("model") not in MODEL_MAP:
     ss.settings["model"] = "Luna 6"
 
 
+# ── 32. 채팅으로 팀원 목록의 팀원에게 메일 보내기 (한 명·여러 명·팀원 전체) ─────────────
+ALL_TEAM_RE = re.compile(r"팀원\s*(전체|모두|전원|다)|(전체|모든)\s*팀원|팀\s*전체|팀원들|모두에게|전원에게")
+
+
+def team_directory():
+    # 팀원 이메일 목록 = 연락처 + 이메일을 등록한 팀원 계정 (같은 이름이면 계정 정보 우선)
+    d = {c["이름"]: {"이름": c["이름"], "이메일": c["이메일"], "직책": c.get("직책", "")} for c in ss.contacts}
+    for u in ss.get("users", []):
+        if u.get("email") and EMAIL_RE.fullmatch(u["email"]):
+            d[u["name"]] = {"이름": u["name"], "이메일": u["email"], "직책": u.get("role", "")}
+    return list(d.values())
+
+
+_v31_find_contact = find_contact
+
+
+def find_contact(raw):
+    # 팀원 목록(계정 이메일 우선)에서 먼저 찾고, 없으면 기존 연락처 검색
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    key = re.sub(r"\s|님|에게|한테|께", "", raw)
+    directory = team_directory()
+    for p in directory:  # 이름·이메일이 정확히 같은 사람
+        if raw.lower() == p["이메일"].lower() or key == p["이름"].replace(" ", ""):
+            return p
+    for p in directory:  # 이름 일부가 맞는 사람
+        name = p["이름"].replace(" ", "")
+        if key and name and (name in key or key in name):
+            return p
+    return _v31_find_contact(raw)
+
+
+def contacts_text():
+    return "\n".join(f"- {p['이름']} ({p['직책']}) <{p['이메일']}>" for p in team_directory()) or "- 없음"
+
+
+ROUTER_PROMPT = ROUTER_PROMPT + """
+받는 사람이 여러 명이면 to에 이름을 쉼표로 나열하라(예: "최 팀장, 이 과장").
+팀원 전체·모두에게 보내라는 요청이면 to는 "팀원 전체"로 하라."""
+
+
+def resolve_recipients(raw):
+    if ALL_TEAM_RE.search(raw):
+        # 팀원 전체 = 팀원 계정 + 팀 업무 담당자 (외부 연락처는 빼고, 보내는 본인도 뺌)
+        me = ss.settings["name"]
+        team = {u["name"] for u in ss.get("users", [])} | {t["담당자"] for t in ss.tasks}
+        return [p for p in team_directory() if p["이름"] in team and p["이름"] != me], []
+    found, missing, seen = [], [], set()
+    for part in re.split(r"\s*(?:,|，|/|;|및|그리고|이랑|하고|랑|와\s|과\s)\s*", raw):
+        part = part.strip()
+        if not part:
+            continue
+        p = find_contact(part)
+        if not p and EMAIL_RE.fullmatch(part):
+            p = {"이름": part, "이메일": part}
+        if p and p["이메일"].lower() not in seen:
+            seen.add(p["이메일"].lower())
+            found.append(p)
+        elif not p:
+            missing.append(part)
+    return found, missing
+
+
+def _send_many(recipients, subject, body):
+    ok, fail = [], []
+    for addr, name in recipients:
+        try:
+            deliver(addr, subject, body, name)
+            ok.append(name or addr)
+        except Exception as e:
+            fail.append(f"{name or addr}: {e}")
+    return ok, fail
+
+
+_v31_tool_email = tool_email
+
+
+def tool_email(a):
+    raw = str(a.get("to") or "")
+    found, missing = resolve_recipients(raw)
+    if len(found) <= 1 and not missing and not ALL_TEAM_RE.search(raw):
+        return _v31_tool_email(a)  # 한 명이면 기존 방식 그대로
+    if not found:
+        return (f"'{raw or '받는 사람'}'의 이메일 주소를 팀원 목록·연락처에서 찾지 못해 보내지 않았다. "
+                "'팀 업무 현황 > 팀원 이메일 목록'에 이메일을 등록하라고 안내하라."), None
+    draft = {"to": ", ".join(p["이메일"] for p in found), "name": ", ".join(p["이름"] for p in found),
+             "subject": a.get("subject") or "(제목 없음)", "body": a.get("body") or "",
+             "recipients": [(p["이메일"], p["이름"]) for p in found]}
+    ss["_draft"] = draft
+    miss = f" 이메일이 없어 빠진 사람: {', '.join(missing)}." if missing else ""
+    if ss.settings.get("auto_send", True) and not a.get("_draft_only"):
+        ok, fail = _send_many(draft["recipients"], draft["subject"], draft["body"])
+        draft["sent"] = f"{len(ok)}명에게 발송 완료 · {datetime.now():%Y-%m-%d %H:%M}"
+        if fail:
+            draft["error"] = "; ".join(fail)
+        rows = [{"이름": p["이름"], "이메일": p["이메일"], "결과": "발송" if p["이름"] in ok else "실패"} for p in found]
+        return (f"이메일 발송 완료 → {', '.join(ok)} ({len(ok)}명).{miss}"
+                + (f" 실패: {'; '.join(fail)}." if fail else "") + " 짧게 보고하라. 본문은 다시 쓰지 마라."), rows
+    return (f"이메일 초안 작성 완료 → 받는 사람 {len(found)}명: {draft['name']}.{miss} 아직 발송 전이며, "
+            "사용자가 '보내줘'라고 답하거나 '📤 이 메일 보내기' 버튼을 누르면 발송된다. 짧게 안내하라."), None
+
+
+TOOLS["email"] = ("📧 이메일 도구", tool_email)  # 채팅이 새 메일 도구(여러 명·팀원 전체)를 쓰도록 교체
+
+_v31_send_draft = send_draft
+
+
+def send_draft(i):
+    d = ss.messages[i]["draft"]
+    if not d.get("recipients"):
+        return _v31_send_draft(i)
+    ok, fail = _send_many(d["recipients"], d["subject"], d["body"])
+    d["sent"] = f"{len(ok)}명에게 발송 완료 · {datetime.now():%Y-%m-%d %H:%M}"
+    d.pop("error", None)
+    if fail:
+        d["error"] = "; ".join(fail)
+
+
+_v31_send_mail = send_mail
+
+
+def send_mail():
+    # 메일 작성 화면: 받는 사람에 여러 명(쉼표)이나 '팀원 전체'를 적어도 발송
+    raw = ss.mail_to.strip()
+    if not ("," in raw or ALL_TEAM_RE.search(raw)):
+        return _v31_send_mail()
+    found, missing = resolve_recipients(raw)
+    if not found or not ss.mail_subject.strip():
+        ss.notice = "⚠️ 받는 사람(팀원 이름·이메일)과 제목을 확인해 주세요."
+        return
+    ok, fail = _send_many([(p["이메일"], p["이름"]) for p in found], ss.mail_subject, ss.mail_body)
+    ss.mail_to = ss.mail_subject = ss.mail_body = ""
+    ss.notice = (f"📤 {len(ok)}명에게 메일을 보냈습니다: {', '.join(ok)}" + (f" · 실패: {'; '.join(fail)}" if fail else "")
+                 + (f" · 이메일이 없어 빠진 사람: {', '.join(missing)}" if missing else ""))
+    if fail:
+        ss.notice = "⚠️ " + ss.notice
+
+
+def save_member_email():
+    name = ss.tm_name if ss.tm_name != "✏️ 직접 입력" else ss.tm_name_new.strip()
+    email = ss.tm_email.strip()
+    if not name or not EMAIL_RE.fullmatch(email):
+        ss.notice = "⚠️ 팀원 이름과 올바른 이메일 주소를 입력해 주세요."
+        return
+    upsert_contact(name, email, ss.tm_role.strip())
+    ss.tm_email = ss.tm_role = ss.tm_name_new = ""
+    ss.notice = f"📇 {name} 님의 이메일을 팀원 목록에 저장했습니다."
+
+
+_v31_page_team = page_team
+
+
+def page_team():
+    _v31_page_team()
+    st.divider()
+    with st.expander(f"📇 팀원 이메일 목록 ({len(team_directory())}명) · 채팅에서 '이름에게 메일 보내줘'로 발송", expanded=False):
+        directory = team_directory()
+        if directory:
+            st.dataframe(pd.DataFrame(directory), hide_index=True, width="stretch")
+        no_mail = [m for m in team_members() if m not in {p["이름"] for p in directory}]
+        if no_mail:
+            st.caption("이메일이 없는 팀원: " + ", ".join(no_mail) + " → 아래에서 등록하면 채팅으로 메일을 보낼 수 있습니다.")
+        a, b = st.columns(2)
+        a.selectbox("팀원", (no_mail or []) + [p["이름"] for p in directory] + ["✏️ 직접 입력"], key="tm_name")
+        if ss.get("tm_name") == "✏️ 직접 입력":
+            b.text_input("이름", key="tm_name_new")
+        c, d = st.columns(2)
+        c.text_input("이메일", key="tm_email", placeholder="예: lee@company.com")
+        d.text_input("직책", key="tm_role", placeholder="예: 과장")
+        st.button("📇 이메일 저장", on_click=save_member_email)
+        st.caption("채팅 예시: '이 과장에게 회의 변경 메일 보내줘' · '최 팀장이랑 이 과장에게 보고 메일 보내줘' · '팀원 전체에게 공지 메일 보내줘'")
+
+
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동 (새 디자인: 로고 · 팀 · 아이콘 메뉴 · 최근 대화 · 사용자)
 # ---------------------------------------------------------------------
@@ -3421,7 +3595,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v7 · 2026-11-05 (흰 화면 고정)")
+    st.caption("버전: v8 · 2026-11-05 (팀원에게 채팅 메일)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
