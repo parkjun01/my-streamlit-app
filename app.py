@@ -3721,8 +3721,22 @@ def page_chat():
     def chat_input_drop(placeholder, **kw):
         kw.setdefault("accept_file", "multiple")
         kw.setdefault("file_type", CHAT_TYPES)
+        kw.setdefault("key", "chat_box")
+        if ss.get("_mic_text"):
+            ss["chat_box"] = ss.pop("_mic_text")  # 마이크로 말한 내용을 입력창에 채움 (보내기 전 수정 가능)
         sub = _ci("메시지를 입력하거나 파일을 끌어다 놓으세요...", **kw)
         dropped = list(getattr(sub, "files", None) or []) if sub is not None and not isinstance(sub, str) else []
+        mic = getattr(sub, "audio", None) if sub is not None and not isinstance(sub, str) else None
+        if mic is not None and not (sub.text or "").strip() and not dropped:
+            # 마이크만 눌렀을 때: 바로 보내지 않고 글자로 바꿔 입력창에 넣어 줌
+            try:
+                with st.spinner("말씀하신 내용을 글자로 바꾸는 중..."):
+                    ss["_mic_text"] = stt(mic.getvalue())
+                ss.last_audio = hashlib.md5(mic.getvalue()).hexdigest()
+            except Exception as e:
+                st.toast("음성 인식 실패: " + diagnostic(e, "음성 인식")["message"])
+                return None
+            st.rerun()
         if dropped:
             ss.setdefault("_drop_box", []).extend(dropped)
         return sub
@@ -3990,7 +4004,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v12 · 2026-11-05 (완료율 100%일 때만 완료)")
+    st.caption("버전: v13 · 2026-11-05 (마이크 → 입력창에 글자)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
