@@ -2766,9 +2766,40 @@ def sign_up():
         ss.login_msg = f"✅ '{name}' 계정을 만들었습니다. 로그인해 주세요."
 
 
+def login_names():
+    # 계정이 있는 사람 + 이메일 관리 연락처에 있는 사람(회원가입 없이 바로 로그인)
+    names = [u["name"] for u in ss.users]
+    return names + [c["이름"] for c in ss.contacts if c.get("이름") and c["이름"] not in names]
+
+
+def first_login(name):
+    # 연락처에 있는 팀원이 처음 로그인할 때 비밀번호를 정하고 계정을 만듦
+    c = next((x for x in ss.contacts if x.get("이름") == name), None)
+    pw, pw2 = ss.li_pw, ss.get("li_pw2", "")
+    if not c:
+        return None
+    if len(pw) < 4 or pw != pw2:
+        ss.login_msg = (f"⚠️ {name} 님은 처음 로그인합니다. 사용할 비밀번호(4자 이상)를 입력하고 "
+                        "'비밀번호 확인'에 한 번 더 입력해 주세요.")
+        return None
+    salt = _secrets.token_hex(16)
+    u = {"name": name, "role": c.get("직책", ""), "team": ss.settings.get("team", "마케팅팀"),
+         "email": c.get("이메일", ""), "salt": salt, "pw": _hash_pw(pw, salt),
+         "created": datetime.now().strftime("%Y-%m-%d %H:%M")}
+    ss.users.append(u)
+    ws_save()
+    return u
+
+
 def log_in():
+    ss.login_msg = ""
     u = find_user(ss.li_name)
-    if not u or not hmac.compare_digest(_hash_pw(ss.li_pw, u["salt"]), u["pw"]):
+    if not u:
+        u = first_login(ss.li_name)
+        if not u:
+            ss.login_msg = ss.get("login_msg") or "⚠️ 이름 또는 비밀번호가 맞지 않습니다."
+            return
+    elif not hmac.compare_digest(_hash_pw(ss.li_pw, u["salt"]), u["pw"]):
         ss.login_msg = "⚠️ 이름 또는 비밀번호가 맞지 않습니다."
         return
     ss.user = u["name"]
@@ -2802,10 +2833,13 @@ if not ss.get("user"):
             (st.warning if msg.startswith("⚠️") else st.success)(msg)
     t_in, t_up = st.tabs(["🔑 로그인", "📝 회원가입"])
     with t_in:
-        if ss.users:
+        if login_names():
+            st.caption("이메일 관리 연락처에 있는 팀원은 회원가입 없이 이름을 골라 로그인할 수 있습니다. "
+                       "처음 로그인할 때만 비밀번호를 정해 '비밀번호 확인'에 한 번 더 입력하세요.")
             with st.form("able_login_form"):  # 폼: 버튼을 누를 때 입력값을 한꺼번에 보냄
-                st.selectbox("이름", [u["name"] for u in ss.users], key="li_name")
+                st.selectbox("이름", login_names(), key="li_name")
                 st.text_input("비밀번호", type="password", key="li_pw")
+                st.text_input("비밀번호 확인 (처음 로그인할 때만)", type="password", key="li_pw2")
                 st.form_submit_button("로그인", type="primary", on_click=log_in)
         else:
             st.info("아직 계정이 없습니다. '📝 회원가입' 탭에서 첫 계정을 만들어 주세요.")
@@ -4179,7 +4213,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v20 · 2026-11-05 (연락처 빼고 다시 초기화)")
+    st.caption("버전: v21 · 2026-11-05 (연락처 팀원은 회원가입 없이 로그인)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
