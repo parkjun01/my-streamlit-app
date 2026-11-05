@@ -1299,7 +1299,7 @@ for _k, _v in {"conversations": [], "conv_id": uuid.uuid4().hex, "candidates": [
         ss[_k] = _v
 
 # 시연 준비: 이 버전이 처음 실행될 때 저장된 데이터(업무·대화·자료·연락처·계정 등)를 딱 한 번 모두 비움
-DEMO_RESET = "demo-reset-2026-11-05"
+DEMO_RESET = "demo-reset-2026-11-05-b"  # 값을 바꾸면 배포 후 한 번 더 전체 초기화
 
 
 def demo_reset_once():
@@ -1333,6 +1333,34 @@ if "ws_loaded" not in ss:
         if _k in _ws:
             ss[_k] = _ws[_k]
     ss.ws_loaded = True
+    ss["_reset_seen"] = json.dumps(DEMO_RESET)
+
+
+def _demo_marker():
+    try:
+        con = ws_db()
+        r = con.execute("SELECT v FROM able_state WHERE k = ?", ("_demo_reset",)).fetchall()
+        con.close()
+        return r[0][0] if r else None
+    except Exception:
+        return None
+
+
+# 초기화 전부터 열려 있던 화면(세션)은 예전 데이터를 들고 있으므로, 저장소 기준으로 다시 비우고 로그아웃
+_mk = _demo_marker()
+if _mk and ss.get("_reset_seen") != _mk:
+    demo_reset_once()
+    _ws = ws_load()
+    _empty = _defaults()
+    for _k in WS_KEYS:
+        ss[_k] = _ws.get(_k, [] if _k != "conv_id" else uuid.uuid4().hex)
+    for _k in ("contacts", "sent", "inbox", "library", "tasks", "schedule"):
+        ss[_k] = _ws.get(_k, _empty[_k])
+    ss.users = _ws.get("users", [])
+    ss.pop("user", None)
+    ss.briefing, ss.suggestions, ss.attach_ids = "", [], []
+    ss["_ws_last"] = {}
+    ss["_reset_seen"] = _mk
 
 for _k, _v in {"custom_model": "", "image_model": "gpt-image-1", "max_output": 4000,
                "reasoning": "자동", "voice_mode": "자동 재생"}.items():
@@ -4142,7 +4170,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v17 · 2026-11-05 (홈에 AI 업무 브리핑)")
+    st.caption("버전: v18 · 2026-11-05 (시연용 전체 초기화 다시 적용)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
