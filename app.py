@@ -68,7 +68,7 @@ if submit:
             input=input_messages
         )
         answer = response.output_text
-# ── (추가) 기존 음성 폼의 결과 출력 + 대화 히스토리 저장 ──────────────
+    # ── (추가) 기존 음성 폼의 결과 출력 + 대화 히스토리 저장 ──────────────
     st.session_state.messages.append({"role": "user", "content": transcript.text})
     st.session_state.messages.append({"role": "assistant", "content": answer})
     with st.chat_message("user"):
@@ -122,6 +122,8 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
 DATA_FILE = "able_data.json"          # 설정·연락처·보낸 메일 저장 파일
 SAVE_KEYS = ["settings", "contacts", "sent"]
 LIB_DIR = "library"                   # 자료실 폴더 (Colab에서는 /content/library)
+KEY_FILE = "api_key.txt"              # Gmail 주소·앱 비밀번호를 읽어 올 파일
+CONFIRM_RE = re.compile(r"(보내|발송|전송|ㅇㅇ|^응|^네|^예|^좋아|^그래)")
 
 
 # ---------------------------------------------------------------------
@@ -133,7 +135,7 @@ def _defaults():
         "menu": MENUS[0],
         "settings": {"name": "김 대리", "team": "마케팅팀", "role": "Marketing Data Analyst",
                      "model": "Luna 6", "common_prompt": "", "voice": "alloy",
-                     "tts_on": True, "autoplay": True, "stt_lang": "ko"},
+                     "tts_on": True, "autoplay": True, "stt_lang": "ko", "auto_send": True},
         "contacts": [
             {"이름": "최 팀장", "이메일": "choi@company.com", "직책": "마케팅팀장"},
             {"이름": "이 과장", "이메일": "lee@company.com", "직책": "과장"},
@@ -326,9 +328,39 @@ def upsert_contact(name, email, title=""):
     ss.contacts.append({"이름": name or email.split("@")[0], "이메일": email, "직책": title})
 
 
+def read_key_file(path=KEY_FILE):
+    # api_key.txt에서 Gmail 주소와 앱 비밀번호를 찾는다
+    # 지원 형식: "GMAIL_ID=...", "gmail_pw: ...", 또는 이메일 한 줄 + 비밀번호 한 줄
+    user = pw = ""
+    try:
+        with open(path, encoding="utf-8") as fp:
+            lines = fp.read().splitlines()
+    except Exception:
+        return user, pw
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        k, v = "", line
+        if not EMAIL_RE.fullmatch(line):
+            for sep in ("=", ":"):
+                if sep in line:
+                    k, v = line.split(sep, 1)
+                    break
+        k, v = k.strip().lower(), v.strip().strip('"').strip("'")
+        if "openai" in k or v.startswith("sk-"):
+            continue
+        if not user and EMAIL_RE.fullmatch(v):
+            user = v
+        elif not pw and (any(w in k for w in ("pass", "pw", "비밀번호", "app")) or not k):
+            pw = v.replace(" ", "")
+    return user, pw
+
+
 def smtp_conf():
-    user = ss.smtp.get("user") or os.environ.get("SMTP_USER", "")
-    pw = ss.smtp.get("password") or os.environ.get("SMTP_PASSWORD", "")
+    file_user, file_pw = read_key_file()
+    user = ss.smtp.get("user") or os.environ.get("SMTP_USER", "") or file_user
+    pw = ss.smtp.get("password") or os.environ.get("SMTP_PASSWORD", "") or file_pw
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     port = int(os.environ.get("SMTP_PORT", "465"))
     return user, pw, host, port
@@ -454,7 +486,7 @@ def route(prompt):
 
 
 def tool_email(a):
-    # 받는 사람을 연락처에서 찾아 메일 초안을 만든다 (발송은 사용자가 버튼으로 확인)
+    # 받는 사람을 연락처에서 찾아 메일을 보낸다 (설정에서 '바로 발송'을 끄거나 '초안만' 요청하면 초안만 작성)
     raw = str(a.get("to") or "")
     c = find_contact(raw)
     m = EMAIL_RE.search(raw)
@@ -463,12 +495,23 @@ def tool_email(a):
     elif m:
         addr, name = m.group(), None
     else:
-        return (f"'{raw or '받는 사람'}'의 이메일 주소를 연락처에서 찾지 못해 초안을 만들지 않았다. "
+        return (f"'{raw or '받는 사람'}'의 이메일 주소를 연락처에서 찾지 못해 보내지 않았다. "
                 "사용자에게 이메일 주소를 알려 달라고 하거나 '이메일 관리 > 연락처'에 등록하라고 안내하라."), None
-    ss["_draft"] = {"to": addr, "name": name, "subject": a.get("subject") or "(제목 없음)",
-                    "body": a.get("body") or ""}
-    return (f"이메일 초안 작성 완료 → 받는 사람: {name or addr} <{addr}>, 제목: {ss['_draft']['subject']}. "
-            "아직 발송 전이며, 사용자가 아래 '📤 이 메일 보내기' 버튼을 누르면 발송된다. "
+    draft = {"to": addr, "name": name, "subject": a.get("subject") or "(제목 없음)", "body": a.get("body") or ""}
+    ss["_draft"] = draft
+    who = f"{name or addr} <{addr}>"
+    if ss.settings.get("auto_send", True) and not a.get("_draft_only"):
+        try:
+            rec = deliver(addr, draft["subject"], draft["body"], name)
+            draft["sent"] = f"{rec['방식']} 완료 · {rec['발송 시각']}"
+            return (f"이메일 {rec['방식']} 완료 → 받는 사람: {who}, 제목: {draft['subject']}. "
+                    "보냈다고 짧게 보고하라. 본문은 다시 쓰지 마라."), None
+        except Exception as e:
+            draft["error"] = str(e)
+            return (f"이메일 발송 실패 → {who}: {e}. 아래 '📤 이 메일 보내기' 버튼으로 다시 시도하거나 "
+                    "설정의 Gmail 정보를 확인하라고 안내하라."), None
+    return (f"이메일 초안 작성 완료 → 받는 사람: {who}, 제목: {draft['subject']}. "
+            "아직 발송 전이며, 사용자가 '보내줘'라고 답하거나 아래 '📤 이 메일 보내기' 버튼을 누르면 발송된다. "
             "본문을 다시 쓰지 말고 짧게 안내하라."), None
 
 
@@ -617,12 +660,29 @@ def handle_turn(prompt, files):
             with st.status("에이블이 생각하는 중...", expanded=True) as status:
                 st.write(f"🧠 사용 모델: {ss.settings['model']} ({model_id()})")
                 st.write("🔍 1단계: 요청 의도 파악")
-                recent = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in history[-4:])
-                r = route(f"[최근 대화]\n{recent}\n\n[현재 요청]\n{prompt}")
-                intent, args = r["intent"], r["args"]
-                st.write(f"➡️ 판독 결과: **{INTENT_LABEL[intent]}**")
-
                 sys_c, table = base_system(), None
+                # 직전 답변에 아직 안 보낸 메일 초안이 있고 "보내줘/응" 같은 짧은 답이면 그 초안을 바로 발송
+                j = len(ss.messages) - 2
+                last_draft = ss.messages[j].get("draft") if j >= 0 and ss.messages[j]["role"] == "assistant" else None
+                if (last_draft and not last_draft.get("sent") and len(prompt) <= 25
+                        and CONFIRM_RE.search(prompt.strip()) and "초안" not in prompt):
+                    intent = "confirm"
+                    st.write("➡️ 판독 결과: **📤 메일 발송 확인**")
+                    send_draft(j)
+                    result = (f"이메일 {last_draft['sent']} → {last_draft['name'] or ''} <{last_draft['to']}>"
+                              if last_draft.get("sent") else f"이메일 발송 실패: {last_draft.get('error')}")
+                    st.write(("✅ " if last_draft.get("sent") else "⚠️ ") + result)
+                    sys_c += f"\n\n[도구 실행 결과]\n{result}\n위 결과를 사용자에게 한두 문장으로 보고하라."
+                    r = {"args": {}}
+                else:
+                    recent = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in history[-4:])
+                    r = route(f"[최근 대화]\n{recent}\n\n[현재 요청]\n{prompt}")
+                    intent = r["intent"]
+                    st.write(f"➡️ 판독 결과: **{INTENT_LABEL[intent]}**")
+                args = r["args"]
+                if intent == "email" and any(w in prompt for w in ("초안", "작성만", "보내지 마")):
+                    args["_draft_only"] = True
+
                 if intent in TOOLS:
                     name, fn = TOOLS[intent]
                     st.write(f"🛠️ 2단계: {name} 실행")
@@ -1077,14 +1137,22 @@ def page_settings():
         lang = c7.selectbox("STT 언어", list(langs), index=list(langs.values()).index(s["stt_lang"]))
 
         st.subheader("📮 메일 발송 (Gmail)")
-        st.caption("비워 두면 모의 발송합니다. 비밀번호는 저장 파일에 남지 않고 이번 접속에서만 쓰입니다.")
+        file_user, file_pw = read_key_file()
+        if file_user and file_pw:
+            st.caption(f"✅ {KEY_FILE}에서 Gmail 정보를 읽었습니다: {file_user} (아래 칸은 비워 둬도 됩니다)")
+        else:
+            st.caption(f"{KEY_FILE}에 Gmail 정보가 없으면 아래에 입력하세요. 모두 비어 있으면 모의 발송합니다. "
+                       "입력한 비밀번호는 저장 파일에 남지 않습니다.")
         c8, c9 = st.columns(2)
         smtp_user = c8.text_input("보내는 Gmail 주소", ss.smtp.get("user", ""))
         smtp_pw = c9.text_input("Gmail 앱 비밀번호 (16자리)", ss.smtp.get("password", ""), type="password")
+        auto_send = st.toggle("채팅에서 메일을 요청하면 바로 발송", s.get("auto_send", True),
+                              help="끄면 채팅에서는 초안만 만들고, '보내줘'라고 답하거나 버튼을 눌러야 발송합니다.")
 
         if st.form_submit_button("💾 저장"):
             s.update({"name": name, "team": team, "role": role, "model": model, "common_prompt": common,
-                      "voice": voice, "tts_on": tts_on, "autoplay": autoplay, "stt_lang": langs[lang]})
+                      "voice": voice, "tts_on": tts_on, "autoplay": autoplay, "stt_lang": langs[lang],
+                      "auto_send": auto_send})
             ss.smtp = {"user": smtp_user.strip(), "password": smtp_pw.replace(" ", "")}
             ss.notice = "설정이 저장되었습니다."
             save_data()
@@ -1092,6 +1160,7 @@ def page_settings():
 
     if st.button("🔊 목소리 미리 듣기"):
         speak(f"안녕하세요, {s['name']}님. 에이블입니다. 오늘도 함께 하겠습니다.", force=True)
+
 
 # =====================================================================
 #  [v4 추가] 위 코드는 그대로 두고, v4에만 있던 기능을 덧붙이는 부분
@@ -2134,6 +2203,8 @@ def page_settings():
     with st.expander("ℹ️ 저장 방식 안내"):
         st.write(f"작업공간 저장 파일: `{os.path.abspath(DB_FILE)}` (SQLite)")
         st.caption("같은 서버에서는 새로고침·재접속해도 유지됩니다. Streamlit Cloud는 재배포·재시작 때 파일이 지워질 수 있으니 백업 ZIP을 받아 두세요.")
+
+
 # ── 15. 업무 상세 드롭다운 (상세 내용·기한·중간 점검·결과물·근거 + 수정 폼) ──
 SAMPLE_DETAILS = {
     "t1": {"상세": "광고 A/B안의 클릭률·전환율을 비교하고 우세안을 정리합니다.", "결과물": "비교표 XLSX와 1페이지 요약", "근거": "주간 마케팅 회의"},
@@ -2269,6 +2340,8 @@ def page_team():
     owner = st.selectbox("상세를 볼 담당자", ["전체"] + sorted({t["담당자"] for t in ss.tasks}), key="team_detail_owner")
     for t in sorted([t for t in ss.tasks if owner == "전체" or t["담당자"] == owner], key=lambda x: x["마감일"]):
         task_detail(t, "teamdet")
+
+
 # ── 16. 메일 계정: Streamlit Cloud Secrets에 어떤 이름으로 저장했든 Gmail 주소·앱 비밀번호 찾기 ──
 _base_smtp_conf = smtp_conf
 _TO_KEY = re.compile(r"(^|[._])(to|recipient|receiver|받는)($|[._])", re.I)
@@ -2299,6 +2372,73 @@ def smtp_conf():
                    and "OPENAI" not in k.upper() and not v.startswith("sk-")), "")
     return user, pw.replace(" ", ""), host, port
 
+
+# ── 17. 메일 발송을 send_email(Gmail 587 + STARTTLS) 방식으로 통일 ─────────────
+from email.mime.text import MIMEText
+from email.header import Header
+
+
+def send_email(to, subject, body):
+    # 참고 코드와 같은 방식. 계정은 Secrets·환경 변수(api_key.txt로 등록된 값 포함)에서 읽음
+    sender, password, _, _ = smtp_conf()
+    sender = sender or os.getenv("GMAIL_ADDRESS", "")
+    password = (password or os.getenv("GMAIL_APP_PASSWORD", "")).replace(" ", "")
+    if not sender or not password:
+        return {"status": "skipped", "error": "Gmail 계정 정보(GMAIL_ADDRESS·GMAIL_APP_PASSWORD)가 없습니다."}
+    msg = MIMEText(body, _charset="utf-8")
+    msg["Subject"] = Header(subject, "utf-8")
+    msg["From"] = sender
+    msg["To"] = to
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+            s.starttls()
+            s.login(sender, password)
+            s.sendmail(sender, [to], msg.as_string())
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+def deliver(to_addr, subject, body, name=None):
+    # 채팅·메일 작성·초안 버튼이 모두 이 함수를 통해 send_email로 발송
+    r = send_email(to_addr, subject, body)
+    if r["status"] == "failed":
+        raise RuntimeError(r["error"])
+    rec = {"받는 사람": f"{name} <{to_addr}>" if name else to_addr, "제목": subject, "본문": body,
+           "발송 시각": datetime.now().strftime("%Y-%m-%d %H:%M"),
+           "방식": "실제 발송" if r["status"] == "success" else "모의 발송"}
+    ss.sent.append(rec)
+    if not any(c["이메일"].lower() == to_addr.lower() for c in ss.contacts):
+        upsert_contact(name, to_addr)
+    return rec
+
+
+# ── 18. 맨 위 음성 서비스(원본 음성 폼)에서 "OO에게 메일 보내줘" 처리 ──────────
+if globals().get("submit") and globals().get("transcript") is not None:
+    _voice_text = transcript.text
+    if re.search(r"메일|이메일|e-?mail", _voice_text, re.I):
+        with st.status("📧 음성 요청을 확인해 메일을 처리합니다...", expanded=True) as _vst:
+            _r = route(_voice_text)
+            if _r["intent"] == "email":
+                _args = _r["args"]
+                if any(w in _voice_text for w in ("초안", "작성만", "보내지 마")):
+                    _args["_draft_only"] = True
+                if "_draft" in ss:
+                    del ss["_draft"]
+                _result, _ = tool_email(_args)
+                _draft = ss.get("_draft")
+                if _draft:
+                    st.write(f"📇 연락처에서 찾음: {_draft['name'] or ''} <{_draft['to']}>")
+                    if ss.messages and ss.messages[-1]["role"] == "assistant":
+                        ss.messages[-1]["draft"] = _draft  # 채팅 화면에서도 보이도록 연결
+                    render_draft(len(ss.messages) - 1, _draft)
+                    _vst.update(label="📧 메일 " + ("발송 완료" if _draft.get("sent") else "초안 작성"), state="complete")
+                else:
+                    st.warning(f"'{_args.get('to') or '받는 사람'}'을(를) 연락처에서 찾지 못해 메일을 보내지 않았습니다. "
+                               "📧 이메일 관리 > 📇 연락처에 먼저 등록해 주세요.")
+                    _vst.update(label="📧 받는 사람을 찾지 못했습니다", state="error")
+            else:
+                _vst.update(label="메일 발송 요청이 아니라서 답변만 했습니다", state="complete", expanded=False)
 
 
 # ---------------------------------------------------------------------
@@ -2333,5 +2473,3 @@ st.divider()
 PAGES[ss.menu]()
 save_data()
 ws_save()
-
-
