@@ -2544,6 +2544,11 @@ def attach_panel():
     return list(files), rec
 
 
+def quick_fill(q):
+    # 자주 쓰는 질문: 바로 보내지 않고 입력창에 넣음 → 입력창에 붙인 파일과 함께 보낼 수 있음
+    ss["_mic_text"] = q.split(" ", 1)[1] if q[:1] and not q[:1].isalnum() and " " in q else q
+
+
 def page_chat():
     st.header("💬 채팅")
     st.radio("자료 분석 범위", ["검색", "전체"], horizontal=True, key="analysis_mode",
@@ -2568,10 +2573,10 @@ def page_chat():
     if attached:
         st.caption("📁 자료실에서 첨부됨: " + ", ".join(f["name"] for f in attached))
 
-    st.caption("⚡ 자주 쓰는 질문")
+    st.caption("⚡ 자주 쓰는 질문 · 누르면 입력창에 들어가고, Enter를 누르면 첨부한 파일과 함께 보냅니다")
     cols = st.columns(len(QUICK_PROMPTS))
     for col, qp in zip(cols, QUICK_PROMPTS):
-        col.button(qp, key=f"qp_{qp}", on_click=set_prompt, args=(qp,))
+        col.button(qp, key=f"qp_{qp}", on_click=quick_fill, args=(qp,))
 
     # 화면 아래 입력창 줄: [＋ 메뉴] [메시지 입력]
     bottom = getattr(st, "bottom", None) or getattr(st, "_bottom", None) or st.container()
@@ -4170,7 +4175,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v18 · 2026-11-05 (시연용 전체 초기화 다시 적용)")
+    st.caption("버전: v19 · 2026-11-05 (자주 쓰는 질문 + 첨부 파일)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
