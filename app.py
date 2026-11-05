@@ -954,6 +954,8 @@ def page_my_tasks():
                     on_change=toggle_task, args=(t["id"],))
         c2.markdown(f"`{dday(t['마감일'])}` {t['마감일']}")
         c3.markdown(f"{t['상태']} · {t['우선순위']}")
+        if t["상태"] == "진행 중":
+            c3.progress(int(t.get("진행률", 0)), text=f"완료율 {int(t.get('진행률', 0))}%")
         c4.button("🗑️", key=f"del_now_{t['id']}", on_click=delete_task_now, args=(t["id"],),
                   help="바로 삭제", type="tertiary")
     if not mine:
@@ -1374,7 +1376,7 @@ def diagnostic(exc, stage="요청 처리"):
              "model_not_found": "모델 이름과 이 계정의 모델 사용 권한을 확인하세요.",
              "context_length_exceeded": "새 대화를 시작하거나 분석 범위를 '검색'으로 바꿔 주세요.",
              "insufficient_quota": "API 결제·사용 한도를 확인하세요.",
-             "unsupported_parameter": "선택한 모델이 이 옵션을 지원하지 않습니다. 설정 > 고급 모델 설정에서 추론 옵션을 '자동'으로 바꿔 주세요."}
+             "unsupported_parameter": "선택한 모델이 이 옵션을 지원하지 않습니다. 다른 모델을 골라 다시 시도해 주세요."}
     status = getattr(exc, "status_code", None)
     hint = hints.get(code, "")
     if status == 400 and not hint:
@@ -1999,7 +2001,7 @@ def page_chat():
             st.button(sq, key=f"sg_{j}", on_click=set_prompt, args=(sq,))
 
 
-# ── 12. 자료실 확장 (종류 필터 · 미리보기 · 관련 구간 검색) ─────────────
+# ── 12. 자료실 확장 (종류 필터 · 미리보기) ─────────────
 _base_page_library = page_library
 
 
@@ -2038,16 +2040,6 @@ def page_library():
             st.caption("이 형식은 미리보기가 없습니다. 원본을 다운로드해 주세요.")
     else:
         st.caption("해당 종류의 자료가 없습니다.")
-    st.subheader("🔎 관련 구간 검색")
-    q = st.text_input("찾을 내용", key="lib_passage_q", placeholder="예: 출시 일정, 예산, 담당자")
-    if q:
-        ctx, srcs = _base_rag(q)
-        if ctx:
-            for part in ctx.split("\n\n[출처: ")[:6]:
-                st.text(part if part.startswith("[출처") else "[출처: " + part)
-            st.button("💬 이 내용으로 질문하기", on_click=go, args=("💬 채팅", q), key="lib_passage_ask")
-        else:
-            st.caption("관련 구간이 없습니다. RAG가 켜져 있는지 확인해 주세요.")
 
 
 # ── 13. 이메일 확장 (Gmail 받은편지함 실제 조회 · 첨부 발송 · 초안 저장) ─
@@ -2173,14 +2165,7 @@ def page_email():
             st.button("📂 초안 불러오기", on_click=load_mail_draft)
 
 
-# ── 14. 설정 확장 (고급 모델 · API 연결 확인 · 백업/복원 · 저장 안내) ──────
-def save_advanced():
-    s = ss.settings
-    s.update({"custom_model": ss.adv_custom.strip(), "image_model": ss.adv_image.strip() or "gpt-image-1",
-              "max_output": int(ss.adv_tokens), "reasoning": ss.adv_reason, "voice_mode": ss.adv_voice})
-    ss.notice = "고급 설정이 저장되었습니다."
-
-
+# ── 14. 설정 확장 (백업/복원 · 저장 안내) ──────
 def backup_bytes():
     data = {k: ss[k] for k in WS_KEYS + SAVE_KEYS if k in ss}
     buf = io.BytesIO()
@@ -2212,24 +2197,6 @@ def page_settings():
     _base_page_settings()
     s = ss.settings
     st.divider()
-    with st.expander("🧠 고급 모델 설정"):
-        st.text_input("직접 입력 모델 ID (모델에서 '✏️ 직접 입력'을 골랐을 때 사용)", s["custom_model"], key="adv_custom",
-                      placeholder="예: gpt-4.1-nano")
-        st.text_input("이미지 생성 모델", s["image_model"], key="adv_image")
-        st.select_slider("최대 출력 토큰", [1000, 2000, 4000, 8000, 16000], value=int(s["max_output"]), key="adv_tokens")
-        opts = ["자동", "low", "medium", "high"]
-        st.selectbox("추론 옵션 (추론 모델에서만 사용)", opts, index=opts.index(s["reasoning"]) if s["reasoning"] in opts else 0,
-                     key="adv_reason", help="'자동'이면 추론 옵션을 보내지 않습니다. 일반 모델에서 다른 값을 고르면 오류가 날 수 있습니다.")
-        st.radio("답변 음성", ["자동 재생", "선택 재생"], index=0 if s["voice_mode"] == "자동 재생" else 1, key="adv_voice",
-                 horizontal=True, help="선택 재생: 답변마다 '🔊 음성으로 듣기'를 눌러야 소리가 납니다.")
-        st.button("💾 고급 설정 저장", on_click=save_advanced)
-    with st.expander("🔌 API 연결 확인"):
-        st.caption("실제 API에 짧은 테스트 요청을 보냅니다. 약간의 사용 요금이 발생할 수 있습니다.")
-        if st.button("대화 모델 연결 확인"):
-            try:
-                st.success(f"✅ {model_id()} 응답: " + llm([{"role": "user", "content": "'연결 확인'이라고만 답하세요."}]))
-            except Exception as e:
-                error_ui(diagnostic(e, "모델 연결 확인"))
     with st.expander("💾 작업공간 백업·복원"):
         st.download_button("⬇️ 백업 ZIP 다운로드", backup_bytes(), file_name="able_backup.zip")
         st.file_uploader("백업 ZIP 선택", type=["zip"], key="backup_up")
@@ -2329,13 +2296,14 @@ def task_detail(t, prefix):
         st.caption(f"근거 · {t.get('근거') or '직접 등록'}")
         if t.get("인용"):
             st.code(t["인용"], language=None)
-        ver = f"{t['id']}_{t['상태']}_{t['마감일']}"  # 다른 화면에서 값이 바뀌면 폼도 새 값으로 다시 그림
+        ver = f"{t['id']}_{t['상태']}_{t['마감일']}_{t.get('진행률', 0)}"  # 다른 화면에서 값이 바뀌면 폼도 새 값으로 다시 그림
         with st.form(f"{prefix}_form_{ver}"):
             status = st.selectbox("진행 상태", STATUS_LIST,
                                   index=STATUS_LIST.index(t["상태"]) if t["상태"] in STATUS_LIST else 0)
             desc = st.text_input("기한 설명", value=t.get("기한 설명", ""), placeholder=f"예: {t['마감일']} 10:00")
             iso = st.text_input("달력 날짜 YYYY-MM-DD · 미정이면 비움", value=str(t["마감일"]))
             detail = st.text_area("상세 내용", value=t.get("상세", ""), height=90)
+            pct = st.slider("완료율 (진행 중일 때 표시)", 0, 100, int(t.get("진행률", 0)), step=5, format="%d%%")
             if st.form_submit_button("변경 저장"):
                 try:
                     new_due = date.fromisoformat(iso.strip()) if iso.strip() else t["마감일"]
@@ -2344,7 +2312,8 @@ def task_detail(t, prefix):
                 else:
                     if not iso.strip():
                         desc = "미정"
-                    for field, value in [("상태", status), ("마감일", new_due), ("기한 설명", desc), ("상세", detail)]:
+                    for field, value in [("상태", status), ("마감일", new_due), ("기한 설명", desc), ("상세", detail),
+                                         ("진행률", pct)]:
                         record_change(t, field, t.get(field, ""), value)
                         t[field] = value
                     st.rerun()
@@ -2835,6 +2804,11 @@ def team_members():
     return sorted(n for n in names if n)
 
 
+def task_pct(t):
+    # 완료 100%, 진행 중이면 적어 둔 완료율, 그 밖에는 0%
+    return 100 if t["상태"] == "완료" else int(t.get("진행률", 0)) if t["상태"] == "진행 중" else 0
+
+
 def team_status_table():
     members = sorted({t["담당자"] for t in ss.tasks} | {u["name"] for u in ss.users})
     rows = []
@@ -2863,8 +2837,9 @@ def team_status_table():
     st.markdown("**📋 팀 업무 한눈에 보기** (담당자 → 마감일 순)")
     if ss.tasks:
         allv = pd.DataFrame([{"담당자": t["담당자"], "업무": t["업무"], "상태": t["상태"], "마감일": t["마감일"],
-                              "D-day": dday(t["마감일"]), "우선순위": t["우선순위"]} for t in ss.tasks])
-        st.dataframe(allv.sort_values(["담당자", "마감일"]), hide_index=True, width="stretch")
+                              "D-day": dday(t["마감일"]), "우선순위": t["우선순위"], "완료율": task_pct(t)} for t in ss.tasks])
+        st.dataframe(allv.sort_values(["담당자", "마감일"]), hide_index=True, width="stretch",
+                     column_config={"완료율": st.column_config.ProgressColumn("완료율", format="%d%%", min_value=0, max_value=100)})
 
 
 def add_team_task():
@@ -3258,7 +3233,7 @@ def create_files(prompt, answer_):
             return [f["id"]], []
         except Exception as e:
             return [], ["이미지 생성 실패: " + diagnostic(e, "이미지 생성")["message"]
-                        + " (설정 > 고급 모델 설정에서 이미지 생성 모델을 확인하세요)"]
+                        + ""]
     return _v27_create_files(prompt, answer_)
 
 
@@ -3335,7 +3310,7 @@ def _stream(model, messages, with_reasoning):
         if event.type in ("response.output_text.delta", "response.refusal.delta"):
             yield event.delta
         elif event.type in ("response.failed", "response.incomplete"):
-            raise ValueError("응답이 완료되지 않았습니다. 설정 > 고급 모델 설정에서 최대 출력 토큰을 늘려 보세요.")
+            raise ValueError("응답이 완료되지 않았습니다. 질문을 나눠서 다시 요청해 보세요.")
 
 
 def stream_llm(messages):
@@ -3616,6 +3591,292 @@ def render_summary(f):
         st.button("🔄 다시 요약", key=f"resum_{f['id']}", on_click=clear_summary, args=(f["id"],), type="tertiary")
 
 
+
+
+# ── 35. 채팅으로 내 작업 편집 (업무명·담당자·마감일·상태·우선순위·상세 등 수정, 삭제) ──
+INTENT_LABEL["task_edit"] = "✏️ 업무 편집"
+EDIT_FIELDS = ["업무", "담당자", "마감일", "상태", "우선순위", "진행률", "상세", "기한 설명", "중간 점검", "결과물", "선행 조건"]
+
+ROUTER_PROMPT = ROUTER_PROMPT.replace("intent는 chat | email | calendar | task | translate 중 하나.",
+                                      "intent는 chat | email | calendar | task | task_edit | translate 중 하나.") + """
+- task_edit: 이미 있는 업무를 고치거나 지우는 요청(예: "보고서 업무 마감 금요일로 바꿔줘", "광고 업무 완료로 해줘", "회의록 정리 업무 삭제해줘").
+  args: {"target": [업무 목록]에 있는 업무명 그대로, "changes": {바꿀 항목만: "업무"(새 업무명), "담당자", "마감일"("YYYY-MM-DD"),
+  "상태"("대기|진행 중|완료|취소"), "우선순위"("높음|보통|낮음"), "진행률"(완료율 0~100 숫자, 예: "60% 했어"→60), "상세", "중간 점검", "결과물"}, "delete": 지우라는 요청이면 true}
+  새 업무를 만드는 요청이면 task_edit이 아니라 task다."""
+
+
+def tasks_text():
+    me = ss.settings["name"]
+    mine = [t for t in ss.tasks if t["담당자"] == me] + [t for t in ss.tasks if t["담당자"] != me]
+    return "\n".join(f"- {t['업무']} (담당 {t['담당자']}, 마감 {t['마감일']}, {t['상태']}, {t['우선순위']})"
+                     for t in mine[:60]) or "- 없음"
+
+
+_v35_route = route
+
+
+def route(prompt):
+    # 라우터가 고칠 업무를 정확히 고르도록 현재 업무 목록을 함께 보여 줌
+    r = _v35_route(f"[업무 목록]\n{tasks_text()}\n\n{prompt}")
+    if r["intent"] in ("chat", "task") and not r["args"].get("title") and re.search(
+            r"(업무|작업|할 ?일).*(수정|변경|바꿔|바꾸|고쳐|편집|삭제|지워|완료로|미뤄|당겨)", prompt):
+        r = {"intent": "task_edit", "args": r["args"]}  # LLM이 못 알아들었을 때 키워드로 보정
+    return r
+
+
+def find_tasks(name):
+    key = re.sub(r"\s+", "", str(name or "")).lower()
+    if not key:
+        return []
+    norm = lambda t: re.sub(r"\s+", "", t["업무"]).lower()
+    exact = [t for t in ss.tasks if norm(t) == key]
+    hits = exact or [t for t in ss.tasks if key in norm(t) or norm(t) in key]
+    me = ss.settings["name"]
+    mine = [t for t in hits if t["담당자"] == me]
+    return mine if len(hits) > 1 and len(mine) == 1 else hits  # 여러 개면 내 업무를 우선
+
+
+def tool_task_edit(a):
+    hits = find_tasks(a.get("target"))
+    if not hits:
+        return (f"'{a.get('target') or '업무'}'와 맞는 업무를 내 작업에서 찾지 못했다. "
+                "업무 이름을 다시 알려 달라고 안내하라."), None
+    if len(hits) > 1:
+        rows = [{"업무": t["업무"], "담당자": t["담당자"], "마감일": t["마감일"], "상태": t["상태"]} for t in hits]
+        return "이름이 비슷한 업무가 여러 개라 고치지 않았다. 아래 표에서 어느 업무인지 정확한 이름을 물어보라.", rows
+    t = hits[0]
+    if a.get("delete"):
+        delete_task_now(t["id"])
+        return f"업무 삭제 완료: {t['업무']} (담당 {t['담당자']}). 짧게 보고하라.", None
+    done = []
+    for field, value in (a.get("changes") or {}).items():
+        if field not in EDIT_FIELDS or value in (None, ""):
+            continue
+        if field == "마감일":
+            value = to_date(value)
+        elif field == "상태" and value not in STATUS_LIST:
+            continue
+        elif field == "우선순위" and value not in ("높음", "보통", "낮음"):
+            continue
+        elif field == "진행률":
+            m = re.search(r"\d+", str(value))
+            if not m:
+                continue
+            value = max(0, min(100, int(m.group())))
+        before = t.get(field, "")
+        if before != value:
+            record_change(t, field, before, value)
+            t[field] = value
+            done.append(f"{field}: {before or '없음'} → {value}")
+    if "진행률" in (a.get("changes") or {}) and t["상태"] != "완료":
+        new = "완료" if t.get("진행률") == 100 else "진행 중"  # 완료율을 말하면 상태도 맞춰 줌
+        if t["상태"] != new:
+            record_change(t, "상태", t["상태"], new)
+            t["상태"] = new
+            done.append(f"상태: → {new}")
+    for k in [f"chk_{t['id']}", f"home_chk_{t['id']}"]:
+        ss.pop(k, None)  # 체크박스가 바뀐 상태를 다시 읽도록
+    if not done:
+        return f"'{t['업무']}' 업무에서 바꿀 내용을 알아듣지 못했다. 무엇을 바꿀지 물어보라.", None
+    row = {k: t.get(k, "") for k in ["업무", "담당자", "마감일", "상태", "우선순위"]}
+    row["완료율"] = f"{task_pct(t)}%"
+    return (f"업무 수정 완료 ({t['업무']}): " + "; ".join(done) + ". '내 작업'과 '팀 업무 현황'에 바로 반영되었다. "
+            "바뀐 내용을 짧게 보고하라."), [row]
+
+
+TOOLS["task_edit"] = ("✏️ 업무 편집 도구", tool_task_edit)
+
+
+# ── 36. 채팅 입력창에 파일을 끌어다 놓아(드래그 앤 드롭) 바로 첨부 ──
+_v36_attach_panel = attach_panel
+_v36_page_chat = page_chat
+
+
+def attach_panel():
+    files, rec = _v36_attach_panel()
+    ss["_drop_box"] = files  # 입력창에 끌어다 놓은 파일을 이 목록에 더해 함께 보냄
+    return files, rec
+
+
+def page_chat():
+    _ci = st.chat_input
+
+    def chat_input_drop(placeholder, **kw):
+        kw.setdefault("accept_file", "multiple")
+        kw.setdefault("file_type", CHAT_TYPES)
+        sub = _ci("메시지를 입력하거나 파일을 끌어다 놓으세요...", **kw)
+        dropped = list(getattr(sub, "files", None) or []) if sub is not None and not isinstance(sub, str) else []
+        if dropped:
+            ss.setdefault("_drop_box", []).extend(dropped)
+        return sub
+
+    st.chat_input = chat_input_drop
+    try:
+        _v36_page_chat()
+    finally:
+        st.chat_input = _ci
+
+
+# ── 37. 설정에서 고급 모델 설정·API 연결 확인을 뺐으므로 '직접 입력' 모델도 목록에서 뺌 ──
+MODEL_MAP.pop("✏️ 직접 입력", None)
+if ss.settings.get("model") not in MODEL_MAP:
+    ss.settings["model"] = next(iter(MODEL_MAP))
+
+
+# ── 38. 채팅·메일 작성에서 팀원에게 메일을 보낼 때 첨부파일도 함께 발송 ──
+import mimetypes
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+
+MAX_ATTACH = 15 * 1024 * 1024
+ROUTER_PROMPT = ROUTER_PROMPT + """
+- email에서 자료실 파일을 첨부해 달라고 하면(예: "보고서.pdf 첨부해서 보내줘", "그 파일 같이 보내줘")
+  args에 "attach": [자료실 파일 목록]에 있는 파일명 그대로 를 넣어라. 첨부 요청이 없으면 넣지 마라."""
+
+_v38_send_email = send_email
+
+
+def send_email(to, subject, body):
+    # ss["_mail_files"]에 첨부할 자료가 있으면 첨부해서 보냄 (없으면 기존 방식 그대로)
+    files = ss.get("_mail_files") or []
+    if not files:
+        return _v38_send_email(to, subject, body)
+    sender, password, _, _ = smtp_conf()
+    sender = sender or os.getenv("GMAIL_ADDRESS", "")
+    password = (password or os.getenv("GMAIL_APP_PASSWORD", "")).replace(" ", "")
+    if not sender or not password:
+        return {"status": "skipped", "error": "Gmail 계정 정보(GMAIL_ADDRESS·GMAIL_APP_PASSWORD)가 없습니다."}
+    msg = MIMEMultipart()
+    msg["Subject"] = Header(subject, "utf-8")
+    msg["From"] = sender
+    msg["To"] = to
+    msg.attach(MIMEText(body, _charset="utf-8"))
+    for f in files:
+        major, minor = (mimetypes.guess_type(f["name"])[0] or "application/octet-stream").split("/", 1)
+        part = MIMEApplication(f["data"], _subtype=minor)
+        part.add_header("Content-Disposition", "attachment", filename=("utf-8", "", f["name"]))
+        msg.attach(part)
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+            s.starttls()
+            s.login(sender, password)
+            s.sendmail(sender, [to], msg.as_string())
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+_v38_deliver = deliver
+
+
+def deliver(to_addr, subject, body, name=None):
+    rec = _v38_deliver(to_addr, subject, body, name)
+    files = ss.get("_mail_files") or []
+    if files:
+        rec["방식"] += f" · 첨부 {len(files)}개"
+    return rec
+
+
+def files_by_ids(ids):
+    return [f for f in ss.library if f["id"] in (ids or [])]
+
+
+def mail_files_for(a):
+    # 이번 채팅에 올린 파일 + 라우터가 고른 자료실 파일
+    files = list(ss.get("_turn_files") or [])
+    names = a.get("attach") or []
+    if isinstance(names, str):
+        names = [names]
+    for n in names:
+        key = re.sub(r"\s+", "", str(n)).lower()
+        hit = next((f for f in ss.library if re.sub(r"\s+", "", f["name"]).lower() == key), None) or \
+            next((f for f in ss.library if key and key in re.sub(r"\s+", "", f["name"]).lower()), None)
+        if hit and hit not in files:
+            files.append(hit)
+    return files
+
+
+_v38_route = route
+
+
+def route(prompt):
+    lib = "\n".join(f"- {f['name']}" for f in ss.library[-40:]) or "- 없음"
+    return _v38_route(f"[자료실 파일 목록]\n{lib}\n\n{prompt}")
+
+
+_v38_handle_turn = handle_turn
+
+
+def handle_turn(prompt, files):
+    ss["_turn_files"] = list(files)
+    try:
+        return _v38_handle_turn(prompt, files)
+    finally:
+        ss.pop("_turn_files", None)
+
+
+_v38_tool_email = tool_email
+
+
+def tool_email(a):
+    files = mail_files_for(a)
+    if sum(f["size"] for f in files) > MAX_ATTACH:
+        return "첨부파일 합계가 15MB를 넘어 보내지 않았다. 파일을 줄여 달라고 안내하라.", None
+    ss["_mail_files"] = files
+    try:
+        result, rows = _v38_tool_email(a)
+    finally:
+        ss.pop("_mail_files", None)
+    d = ss.get("_draft")
+    if files and d is not None:
+        d["attach"] = [f["id"] for f in files]
+        result += f" 첨부파일 {len(files)}개: {', '.join(f['name'] for f in files)}."
+    return result, rows
+
+
+TOOLS["email"] = ("📧 이메일 도구", tool_email)
+
+_v38_send_draft = send_draft
+
+
+def send_draft(i):
+    ss["_mail_files"] = files_by_ids(ss.messages[i]["draft"].get("attach"))
+    try:
+        _v38_send_draft(i)
+    finally:
+        ss.pop("_mail_files", None)
+
+
+_v38_render_draft = render_draft
+
+
+def render_draft(i, d):
+    _v38_render_draft(i, d)
+    names = [f["name"] for f in files_by_ids(d.get("attach"))]
+    if names:
+        st.caption("📎 첨부파일: " + ", ".join(names))
+
+
+_v38_send_with_files = send_with_files
+
+
+def send_with_files():
+    # 메일 작성 > '첨부해서 보내기'에서도 여러 명·팀원 전체에게 첨부 발송
+    raw = ss.mail_to.strip()
+    if not ("," in raw or ALL_TEAM_RE.search(raw)):
+        return _v38_send_with_files()
+    files = files_by_ids(ss.get("mail_attach"))
+    if sum(f["size"] for f in files) > MAX_ATTACH:
+        ss.notice = "⚠️ 첨부파일 합계는 15MB 이하만 보낼 수 있습니다."
+        return
+    ss["_mail_files"] = files
+    try:
+        send_mail()
+    finally:
+        ss.pop("_mail_files", None)
+    if files and not ss.notice.startswith("⚠️"):
+        ss.mail_attach = []
+        ss.notice += f" · 첨부 {len(files)}개"
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동 (새 디자인: 로고 · 팀 · 아이콘 메뉴 · 최근 대화 · 사용자)
 # ---------------------------------------------------------------------
@@ -3648,7 +3909,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v9 · 2026-11-05 (작업 바로 삭제·자료 요약)")
+    st.caption("버전: v10 · 2026-11-05 (채팅 업무 편집·파일 끌어다 놓기·메일 첨부)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
