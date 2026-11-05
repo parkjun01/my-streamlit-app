@@ -2441,6 +2441,444 @@ if globals().get("submit") and globals().get("transcript") is not None:
                 _vst.update(label="메일 발송 요청이 아니라서 답변만 했습니다", state="complete", expanded=False)
 
 
+# ── 19. 맨 위 기존 음성 서비스(제목·안내문·폼) 화면에서 숨기기 (원본 코드는 그대로) ──
+st.markdown("""<style>
+[data-testid="stElementContainer"]:has(h1#ai),
+[data-testid="stElementContainer"]:has(h1#ai) + *,
+[data-testid="stElementContainer"]:has(h1#ai) + * + * {display:none !important}
+.able-attach-title{font-weight:600;margin-bottom:.2rem}
+[data-testid="stPopoverBody"] button[kind="tertiary"]{justify-content:flex-start !important;font-size:1rem;padding:.55rem .8rem;border-radius:8px}
+[data-testid="stPopoverBody"] button[kind="tertiary"] > div,[data-testid="stPopoverBody"] button[kind="tertiary"] p{justify-content:flex-start !important;text-align:left !important;width:100%}
+[data-testid="stPopoverBody"] button[kind="tertiary"]:hover{background:#EDF4F3}
+</style>""", unsafe_allow_html=True)
+
+
+# ── 20. 알림 자리를 항상 만들어 탭이 첫 탭으로 돌아가지 않게 함 ─────────────
+def show_notice():
+    box = st.container()  # 알림이 없어도 자리를 유지 → 아래 탭 위치가 바뀌지 않음
+    if ss.notice:
+        with box:
+            (st.warning if ss.notice.startswith("⚠️") else st.success)(ss.notice)
+        ss.notice = ""
+
+
+# ── 21. 메일 계정: Secrets뿐 아니라 환경 변수(api_key.txt로 등록한 값)도 읽기 ──
+_v16_smtp_conf = smtp_conf
+
+
+def smtp_conf():
+    user, pw, host, port = _v16_smtp_conf()
+    user = user or get_secret("GMAIL_ADDRESS") or get_secret("SMTP_USER")
+    pw = pw or get_secret("GMAIL_APP_PASSWORD") or get_secret("SMTP_PASSWORD")
+    return user, pw.replace(" ", ""), host, port
+
+
+# ── 22. 채팅 ＋ 버튼: 누르면 첨부 메뉴(파일·이미지·음성 파일·카메라)가 먼저 나옴 ──
+ATTACH_MENU = [("file", "📎 파일 업로드"), ("image", "🖼️ 이미지 첨부"),
+               ("audio", "🎙️ 음성 파일 첨부"), ("camera", "📷 카메라 촬영")]
+IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
+if "attach_mode" not in ss:
+    ss.attach_mode = None
+
+
+def set_attach_mode(mode):
+    ss.attach_mode = mode
+
+
+def attach_panel():
+    # 고른 메뉴에 맞는 첨부 칸을 보여 주고, 첨부된 파일·녹음을 돌려줌
+    files, rec = [], None
+    mode = ss.attach_mode
+    if not mode:
+        return files, rec
+    k = ss.chat_key
+    with st.container(border=True):
+        a, b = st.columns([6, 1])
+        a.markdown(f'<div class="able-attach-title">{dict(ATTACH_MENU)[mode]}</div>', unsafe_allow_html=True)
+        b.button("✕ 닫기", key=f"att_close_{k}", on_click=set_attach_mode, args=(None,))
+        if mode == "file":
+            files = st.file_uploader("파일을 선택하거나 끌어다 놓으세요", type=CHAT_TYPES, accept_multiple_files=True,
+                                     key=f"att_file_{k}", label_visibility="collapsed") or []
+        elif mode == "image":
+            files = st.file_uploader("이미지를 선택하세요", type=IMAGE_TYPES, accept_multiple_files=True,
+                                     key=f"att_img_{k}", label_visibility="collapsed") or []
+        elif mode == "audio":
+            files = st.file_uploader("음성 파일(mp3·wav·m4a 등)을 선택하세요", type=AUDIO_EXT, accept_multiple_files=True,
+                                     key=f"att_aud_{k}") or []
+            rec = st.audio_input("또는 바로 녹음하기", key=f"att_rec_{k}")
+        elif mode == "camera":
+            shot = st.camera_input("카메라로 촬영하세요", key=f"att_cam_{k}")
+            if shot is not None:
+                shot.name = f"카메라_{hashlib.md5(shot.getvalue()).hexdigest()[:6]}.jpg"
+                files = [shot]
+        if files:
+            st.caption("첨부됨: " + ", ".join(f.name for f in files) + " · 메시지를 입력하고 보내면 함께 전달됩니다.")
+    return list(files), rec
+
+
+def page_chat():
+    st.header("💬 채팅")
+    st.radio("자료 분석 범위", ["검색", "전체"], horizontal=True, key="analysis_mode",
+             help="검색: 질문과 관련된 부분만 참고 / 전체: RAG에 켜 둔 자료 전체(최대 4만 5천 자)를 참고")
+
+    for i, m in enumerate(ss.messages):
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+            if m["role"] == "assistant":
+                render_extras(i, m)
+                render_more(i, m)
+            elif m.get("files"):
+                st.caption("📎 " + ", ".join(m["files"]))
+
+    chat_area = st.container()
+
+    with st.expander("📎 파일 첨부 · 🎤 음성 입력", expanded=ss.open_tools):
+        ups = st.file_uploader("PDF, 이미지, 문서 파일을 끌어다 놓으세요", type=CHAT_TYPES,
+                               accept_multiple_files=True, key=f"chat_up_{ss.chat_key}")
+        audio = st.audio_input("마이크로 말씀하세요", key=f"chat_audio_{ss.chat_key}")
+    attached = [f for f in ss.library if f["id"] in ss.attach_ids]
+    if attached:
+        st.caption("📁 자료실에서 첨부됨: " + ", ".join(f["name"] for f in attached))
+
+    st.caption("⚡ 자주 쓰는 질문")
+    cols = st.columns(len(QUICK_PROMPTS))
+    for col, qp in zip(cols, QUICK_PROMPTS):
+        col.button(qp, key=f"qp_{qp}", on_click=set_prompt, args=(qp,))
+
+    # 화면 아래 입력창 줄: [＋ 메뉴] [메시지 입력]
+    bottom = getattr(st, "bottom", None) or getattr(st, "_bottom", None) or st.container()
+    with bottom:
+        panel_files, panel_rec = attach_panel()
+        plus, box = st.columns([1, 14], vertical_alignment="bottom")
+        with plus:
+            with st.popover("＋"):
+                for mode, label in ATTACH_MENU:
+                    st.button(label, key=f"att_menu_{mode}", on_click=set_attach_mode, args=(mode,),
+                              type="tertiary", width="stretch")
+        with box:
+            sub = st.chat_input("메시지를 입력하세요...", accept_audio=True)
+
+    prompt, sub_audio = "", None
+    if isinstance(sub, str):
+        prompt = sub
+    elif sub is not None:
+        prompt = sub.text or ""
+        sub_audio = getattr(sub, "audio", None)
+
+    if ss.pending_prompt and not prompt:
+        prompt, ss.pending_prompt = ss.pending_prompt, None
+    if sub is not None or prompt:
+        for au in [x for x in (sub_audio, panel_rec, audio) if x is not None]:
+            audio_bytes = au.getvalue()
+            h = hashlib.md5(audio_bytes).hexdigest()
+            if h != ss.last_audio:
+                ss.last_audio = h
+                try:
+                    prompt = (prompt + "\n" + stt(audio_bytes)).strip()
+                except Exception as e:
+                    error_ui(diagnostic(e, "음성 인식"))
+    elif audio is not None and hashlib.md5(audio.getvalue()).hexdigest() != ss.last_audio:
+        ss.last_audio = hashlib.md5(audio.getvalue()).hexdigest()
+        try:
+            prompt = stt(audio.getvalue())
+        except Exception as e:
+            error_ui(diagnostic(e, "음성 인식"))
+    if not prompt and sub is not None and panel_files:
+        prompt = "첨부 자료의 주요 내용과 확인할 사항을 정리해줘."
+
+    if prompt:
+        files = [add_to_library(u.name, u.getvalue(), "업로드") for u in list(ups or []) + panel_files]
+        files += [f for f in attached if f not in files]
+        ss.open_tools = False
+        ss.attach_mode = None
+        ss.last_error = None
+        n_before = len(ss.messages)
+        with chat_area:
+            handle_turn(prompt, files)
+            if ss.last_error:
+                error_ui(ss.last_error)
+            last = ss.messages[-1] if len(ss.messages) == n_before + 2 else None
+            if last and ss.last_error is None:
+                warnings = []
+                if WANTS_FILE_RE.search(prompt):
+                    with st.spinner("요청한 결과 파일을 만들고 있습니다..."):
+                        last["outputs"], errs = create_files(prompt, last["content"])
+                    warnings += errs
+                if re.search(r"회의|업무|할 ?일|담당|기한", prompt):
+                    with st.spinner("자료에서 업무 후보를 찾고 있습니다..."):
+                        n = extract_candidates(prompt, files)
+                    if n:
+                        warnings.append(f"업무 후보 {n}건을 '내 작업 > 📥 검토함'에 저장했습니다. 근거를 확인한 뒤 반영하세요.")
+                last["warnings"] = warnings
+                if last.get("outputs") or warnings:
+                    render_more(len(ss.messages) - 1, last)
+        archive_current()
+
+    if ss.suggestions:
+        st.caption("💡 이어서 물어보기")
+        for j, sq in enumerate(ss.suggestions):
+            st.button(sq, key=f"sg_{j}", on_click=set_prompt, args=(sq,))
+
+
+# ── 23. 모든 그래프에서 확대·축소(줌)·이동 기능 없애기 ─────────────────────────
+import altair as alt
+
+
+def _static_chart(mark):
+    def draw(data=None, **kwargs):
+        df = data.to_frame() if isinstance(data, pd.Series) else pd.DataFrame(data)
+        df = df.reset_index()
+        idx = str(df.columns[0])
+        df.columns = [str(c) for c in df.columns]
+        long = df.melt(id_vars=idx, var_name="항목", value_name="값")
+        enc = {"x": alt.X(field=idx, type="nominal", title=None, sort=None, axis=alt.Axis(labelAngle=0)),
+               "y": alt.Y(field="값", type="quantitative", title=None),
+               "tooltip": [alt.Tooltip(field=idx, type="nominal"), alt.Tooltip(field="항목", type="nominal"),
+                           alt.Tooltip(field="값", type="quantitative")]}
+        if long["항목"].nunique() > 1:
+            enc["color"] = alt.Color(field="항목", type="nominal", legend=alt.Legend(title=None, orient="bottom"))
+        style = {} if "color" in enc else {"color": "#0E7490"}
+        chart = getattr(alt.Chart(long), mark)(**style).encode(**enc)
+        # .interactive()를 쓰지 않으므로 마우스 휠 확대·축소와 끌어서 이동이 되지 않음
+        return st.altair_chart(chart, width="stretch")
+    return draw
+
+
+st.bar_chart = _static_chart("mark_bar")
+st.line_chart = _static_chart("mark_line")
+st.area_chart = _static_chart("mark_area")
+
+
+# ── 24. 여러 사람이 함께 쓸 때: 다른 사람이 저장한 내용을 불러와 덮어쓰기 방지 ──────
+def ws_sync():
+    # 내가 아직 바꾸지 않은 항목만, 다른 사람이 더 최근에 저장했다면 새로 불러옴
+    try:
+        con = ws_db()
+        rows = dict(con.execute("SELECT k, v FROM able_state").fetchall())
+        con.close()
+    except Exception:
+        return
+    last = ss.setdefault("_ws_last", {})
+    for k, raw in rows.items():
+        if k not in WS_KEYS or k == "conv_id" or k == "messages" or k == "conversations":
+            continue
+        mine = json.dumps(ss.get(k), ensure_ascii=False, default=_enc)
+        if raw != last.get(k) and (k not in last or mine == last.get(k)):
+            ss[k] = json.loads(raw, object_hook=_dec)
+            last[k] = raw
+
+
+# ── 25. 로그인 (팀원별 계정) ─────────────────────────────────────────────
+import secrets as _secrets
+if "users" not in WS_KEYS:
+    WS_KEYS.append("users")
+PER_USER_KEYS = ["messages", "conversations", "conv_id"]  # 대화는 사람마다 따로 저장
+for _k in PER_USER_KEYS:
+    if _k in WS_KEYS:
+        WS_KEYS.remove(_k)
+_v4_ws_save = ws_save
+
+
+def ws_save():
+    _v4_ws_save()
+    if not ss.get("user"):
+        return
+    try:
+        last = ss.setdefault("_ws_last", {})
+        con = ws_db()
+        for k in PER_USER_KEYS:
+            key = f"{k}::{ss.user}"
+            raw = json.dumps(ss.get(k), ensure_ascii=False, default=_enc)
+            if last.get(key) != raw:
+                con.execute("INSERT INTO able_state(k, v, updated) VALUES(?,?,?) "
+                            "ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated=excluded.updated",
+                            (key, raw, datetime.now().isoformat()))
+                last[key] = raw
+        con.commit()
+        con.close()
+    except Exception as e:
+        st.sidebar.caption(f"⚠️ 대화 저장 실패: {e}")
+if "users" not in ss:
+    ss.users = ws_load().get("users", [])
+
+
+def _hash_pw(pw, salt):
+    return hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 120000).hex()
+
+
+def find_user(name):
+    return next((u for u in ss.users if u["name"] == name.strip()), None)
+
+
+def sign_up():
+    name, pw, pw2 = ss.su_name.strip(), ss.su_pw, ss.su_pw2
+    if not name or not pw:
+        ss.login_msg = "⚠️ 이름과 비밀번호를 입력해 주세요."
+    elif len(pw) < 4:
+        ss.login_msg = "⚠️ 비밀번호는 4자 이상으로 정해 주세요."
+    elif pw != pw2:
+        ss.login_msg = "⚠️ 비밀번호 확인이 일치하지 않습니다."
+    elif find_user(name):
+        ss.login_msg = f"⚠️ '{name}' 계정이 이미 있습니다. 로그인해 주세요."
+    else:
+        salt = _secrets.token_hex(16)
+        ss.users.append({"name": name, "role": ss.su_role.strip(), "team": ss.su_team.strip() or "마케팅팀",
+                         "email": ss.su_email.strip(), "salt": salt, "pw": _hash_pw(pw, salt),
+                         "created": datetime.now().strftime("%Y-%m-%d %H:%M")})
+        if ss.su_email.strip() and EMAIL_RE.fullmatch(ss.su_email.strip()):
+            upsert_contact(name, ss.su_email.strip(), ss.su_role.strip())
+        ws_save()
+        ss.login_msg = f"✅ '{name}' 계정을 만들었습니다. 로그인해 주세요."
+
+
+def log_in():
+    u = find_user(ss.li_name)
+    if not u or not hmac.compare_digest(_hash_pw(ss.li_pw, u["salt"]), u["pw"]):
+        ss.login_msg = "⚠️ 이름 또는 비밀번호가 맞지 않습니다."
+        return
+    ss.user = u["name"]
+    data = ws_load()  # 이 사람의 대화 기록만 불러옴
+    ss.messages = data.get(f"messages::{u['name']}", [])
+    ss.conversations = data.get(f"conversations::{u['name']}", [])
+    ss.conv_id = data.get(f"conv_id::{u['name']}", uuid.uuid4().hex)
+    ss.suggestions = []
+    ss.settings.update({"name": u["name"], "role": u.get("role") or ss.settings["role"], "team": u.get("team") or ss.settings["team"]})
+    ss.menu = MENUS[0]
+    ss.login_msg = ""
+
+
+def log_out():
+    for k in ["user", "suggestions"]:
+        ss.pop(k, None)
+    ss.messages, ss.conversations, ss.attach_ids = [], [], []
+    ss.conv_id = uuid.uuid4().hex
+
+
+ss.users = ws_load().get("users", ss.users) if not ss.get("user") else ss.users
+if not ss.get("user"):
+    st.markdown("## 🔐 에이블 로그인")
+    st.caption("팀원별 계정으로 로그인하면 '내 작업'이 내 업무로 바뀌고, 팀 업무를 함께 관리할 수 있습니다.")
+    msg_box = st.container()  # 안내 문구 자리를 항상 만들어 탭이 첫 탭으로 돌아가지 않게 함
+    msg = ss.get("login_msg", "")
+    if msg:
+        with msg_box:
+            (st.warning if msg.startswith("⚠️") else st.success)(msg)
+    t_in, t_up = st.tabs(["🔑 로그인", "📝 회원가입"])
+    with t_in:
+        if ss.users:
+            with st.form("able_login_form"):  # 폼: 버튼을 누를 때 입력값을 한꺼번에 보냄
+                st.selectbox("이름", [u["name"] for u in ss.users], key="li_name")
+                st.text_input("비밀번호", type="password", key="li_pw")
+                st.form_submit_button("로그인", type="primary", on_click=log_in)
+        else:
+            st.info("아직 계정이 없습니다. '📝 회원가입' 탭에서 첫 계정을 만들어 주세요.")
+    with t_up:
+        with st.form("able_signup_form"):
+            a, b = st.columns(2)
+            a.text_input("이름", key="su_name", placeholder="예: 김 대리")
+            b.text_input("직책", key="su_role", placeholder="예: 대리")
+            a.text_input("소속", key="su_team", placeholder="예: 마케팅팀")
+            b.text_input("이메일 (연락처에 자동 등록)", key="su_email", placeholder="예: kim@company.com")
+            a.text_input("비밀번호", type="password", key="su_pw")
+            b.text_input("비밀번호 확인", type="password", key="su_pw2")
+            st.form_submit_button("회원가입", on_click=sign_up)
+    st.stop()
+
+ws_sync()
+
+with st.sidebar:
+    st.markdown(f"👤 **{ss.user}** 님 로그인 중")
+    st.button("로그아웃", on_click=log_out, key="logout_btn")
+
+
+# ── 26. 팀 업무 현황표 · 팀원별 업무 추가 ─────────────────────────────────
+def team_members():
+    names = {u["name"] for u in ss.users} | {c["이름"] for c in ss.contacts} | {t["담당자"] for t in ss.tasks}
+    names.add(ss.settings["name"])
+    return sorted(n for n in names if n)
+
+
+def team_status_table():
+    members = sorted({t["담당자"] for t in ss.tasks} | {u["name"] for u in ss.users})
+    rows = []
+    for m in members:
+        ts = [t for t in ss.tasks if t["담당자"] == m]
+        open_ = [t for t in ts if t["상태"] not in ("완료", "취소")]
+        nxt = min(open_, key=lambda x: x["마감일"]) if open_ else None
+        done = sum(t["상태"] == "완료" for t in ts)
+        rows.append({"담당자": m, "전체": len(ts), "대기": sum(t["상태"] == "대기" for t in ts),
+                     "진행 중": sum(t["상태"] == "진행 중" for t in ts), "완료": done,
+                     "기한 초과": sum(t["마감일"] < TODAY for t in open_),
+                     "마감 임박(2일)": sum(TODAY <= t["마감일"] <= TODAY + timedelta(days=2) for t in open_),
+                     "완료율": round(done / len(ts) * 100) if ts else 0,
+                     "가장 급한 업무": f"{nxt['업무']} ({dday(nxt['마감일'])})" if nxt else "-"})
+    df = pd.DataFrame(rows)
+    total = len(ss.tasks)
+    done_all = sum(t["상태"] == "완료" for t in ss.tasks)
+    c = st.columns(4)
+    c[0].metric("팀 전체 업무", total)
+    c[1].metric("팀 완료율", f"{round(done_all / total * 100) if total else 0}%")
+    c[2].metric("기한 초과", int(df["기한 초과"].sum()) if not df.empty else 0)
+    c[3].metric("마감 임박(2일)", int(df["마감 임박(2일)"].sum()) if not df.empty else 0)
+    if not df.empty:
+        st.dataframe(df, hide_index=True, width="stretch",
+                     column_config={"완료율": st.column_config.ProgressColumn("완료율", format="%d%%", min_value=0, max_value=100)})
+    st.markdown("**📋 팀 업무 한눈에 보기** (담당자 → 마감일 순)")
+    if ss.tasks:
+        allv = pd.DataFrame([{"담당자": t["담당자"], "업무": t["업무"], "상태": t["상태"], "마감일": t["마감일"],
+                              "D-day": dday(t["마감일"]), "우선순위": t["우선순위"]} for t in ss.tasks])
+        st.dataframe(allv.sort_values(["담당자", "마감일"]), hide_index=True, width="stretch")
+
+
+def add_team_task():
+    owner = ss.tt_owner_new.strip() if ss.tt_owner == "✏️ 직접 입력" else ss.tt_owner
+    title = ss.tt_title.strip()
+    if not owner or not title:
+        ss.notice = "⚠️ 담당자와 업무명을 입력해 주세요."
+        return
+    t = {"id": uuid.uuid4().hex[:8], "업무": title, "담당자": owner, "마감일": ss.tt_due, "상태": "대기",
+         "우선순위": ss.tt_pr, "상세": ss.tt_detail.strip(), "결과물": ss.tt_out.strip(),
+         "근거": f"{ss.user} 님이 팀 업무 현황에서 등록"}
+    ss.tasks.append(t)
+    record_change(t, "등록", "-", f"{owner}에게 배정 (등록: {ss.user})")
+    for k in ["tt_title", "tt_detail", "tt_out", "tt_owner_new"]:
+        ss[k] = ""
+    ss.notice = f"✅ {owner} 님에게 '{title}' 업무를 추가했습니다."
+
+
+def team_task_form():
+    with st.expander("➕ 팀원에게 업무 추가", expanded=False):
+        a, b = st.columns(2)
+        a.selectbox("담당자", team_members() + ["✏️ 직접 입력"], key="tt_owner")
+        if ss.get("tt_owner") == "✏️ 직접 입력":
+            b.text_input("담당자 이름", key="tt_owner_new")
+        st.text_input("업무명", key="tt_title", placeholder="예: 11월 SNS 콘텐츠 일정표 작성")
+        c, d = st.columns(2)
+        c.date_input("마감일", TODAY + timedelta(days=3), key="tt_due")
+        d.selectbox("우선순위", ["높음", "보통", "낮음"], index=1, key="tt_pr")
+        st.text_area("상세 내용", key="tt_detail", height=80)
+        st.text_input("결과물", key="tt_out", placeholder="예: 일정표 XLSX")
+        st.button("업무 추가", type="primary", on_click=add_team_task)
+
+
+_v15_page_team = page_team
+
+
+def page_team():
+    st.header("👥 팀 업무 현황")
+    show_notice()
+    st.subheader("📊 팀 업무 현황표")
+    team_status_table()
+    team_task_form()
+    st.divider()
+    _h = st.header
+    st.header = lambda *a, **k: None  # 아래 기존 화면의 제목이 두 번 나오지 않게 함
+    try:
+        _v15_page_team()
+    finally:
+        st.header = _h
+
+
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동 (v4: 최근 대화 목록 · 잠금 추가)
 # ---------------------------------------------------------------------
