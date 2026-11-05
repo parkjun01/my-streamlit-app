@@ -1567,7 +1567,7 @@ def task_board(tasks, prefix):
                     st.caption(f"{t['담당자']} · {t['마감일']} ({dday(t['마감일'])}) · {t['우선순위']}")
                     k, kd, kp = f"{prefix}_st_{t['id']}", f"{prefix}_due_{t['id']}", f"{prefix}_pr_{t['id']}"
                     ss[k], ss[kd], ss[kp] = t["상태"], t["마감일"], t["우선순위"]  # 다른 화면에서 바뀐 값과 맞춤
-                    st.selectbox("상태", STATUS_LIST, key=k, on_change=board_set, args=(t["id"], "상태", k),
+                    st.selectbox("상태", status_options(t), key=k, on_change=board_set, args=(t["id"], "상태", k),
                                  label_visibility="collapsed")
                     if t["상태"] == "진행 중":  # 진행 중이면 완료율 설정
                         pct = int(t.get("진행률", 0))
@@ -2311,8 +2311,9 @@ def task_detail(t, prefix):
             st.code(t["인용"], language=None)
         ver = f"{t['id']}_{t['상태']}_{t['마감일']}_{t.get('진행률', 0)}"  # 다른 화면에서 값이 바뀌면 폼도 새 값으로 다시 그림
         with st.form(f"{prefix}_form_{ver}"):
-            status = st.selectbox("진행 상태", STATUS_LIST,
-                                  index=STATUS_LIST.index(t["상태"]) if t["상태"] in STATUS_LIST else 0)
+            opts = status_options(t)
+            status = st.selectbox("진행 상태", opts, index=opts.index(t["상태"]) if t["상태"] in opts else 0,
+                                  help="진행 중인 업무는 완료율이 100%가 되면 완료로 넘어갑니다.")
             desc = st.text_input("기한 설명", value=t.get("기한 설명", ""), placeholder=f"예: {t['마감일']} 10:00")
             iso = st.text_input("달력 날짜 YYYY-MM-DD · 미정이면 비움", value=str(t["마감일"]))
             detail = st.text_area("상세 내용", value=t.get("상세", ""), height=90)
@@ -2325,6 +2326,8 @@ def task_detail(t, prefix):
                 else:
                     if not iso.strip():
                         desc = "미정"
+                    if pct == 100 and status == "진행 중":
+                        status = "완료"  # 완료율 100%면 완료로
                     for field, value in [("상태", status), ("마감일", new_due), ("기한 설명", desc), ("상세", detail),
                                          ("진행률", pct)]:
                         record_change(t, field, t.get(field, ""), value)
@@ -3743,6 +3746,64 @@ for _t in ss.tasks:
         _t["상태"] = "대기"
 
 
+# ── 40. 진행 중 업무는 완료율이 100%가 되었을 때만 '완료'로 넘어감 (그 밖에는 진행 중 유지) ──
+def blocks_done(t):
+    return t.get("상태") == "진행 중" and int(t.get("진행률", 0)) < 100
+
+
+def status_options(t):
+    return [s for s in STATUS_LIST if not (s == "완료" and blocks_done(t))]
+
+
+def _keep_in_progress(t, before):
+    # 진행 중이던 업무가 100% 전에 완료로 바뀌었으면 진행 중으로 되돌림
+    if before == "진행 중" and t["상태"] == "완료" and int(t.get("진행률", 0)) < 100:
+        t["상태"] = "진행 중"
+        for i in range(len(ss.changes) - 1, -1, -1):  # 방금 남긴 '진행 중 → 완료' 기록을 지움
+            c = ss.changes[i]
+            if c["업무"] == t["업무"] and c["항목"] == "상태" and c["이후"] == "완료":
+                del ss.changes[i]
+                break
+        for k in [f"chk_{t['id']}", f"home_chk_{t['id']}"]:
+            ss.pop(k, None)
+        st.toast(f"'{t['업무']}'은(는) 완료율이 {int(t.get('진행률', 0))}%라 진행 중으로 둡니다. 100%가 되면 완료로 넘어갑니다.")
+        return True
+    return False
+
+
+def _guard(fn):
+    def wrapped(tid, *a):
+        t = next((x for x in ss.tasks if x["id"] == tid), None)
+        before = t["상태"] if t else None
+        fn(tid, *a)
+        if t:
+            _keep_in_progress(t, before)
+    return wrapped
+
+
+toggle_task = _guard(toggle_task)
+home_toggle = _guard(home_toggle)
+board_set = _guard(board_set)
+
+_v40_tool_task_edit = tool_task_edit
+
+
+def tool_task_edit(a):
+    hits = find_tasks(a.get("target"))
+    t = hits[0] if len(hits) == 1 else None
+    before = t["상태"] if t else None
+    result, rows = _v40_tool_task_edit(a)
+    if t and _keep_in_progress(t, before):
+        result += (f" 단, 완료율이 {int(t.get('진행률', 0))}%라 상태는 진행 중으로 유지했다. "
+                   "완료율을 100%로 하면 완료로 넘어간다고 안내하라.")
+        if rows:
+            rows[0]["상태"] = t["상태"]
+    return result, rows
+
+
+TOOLS["task_edit"] = ("✏️ 업무 편집 도구", tool_task_edit)
+
+
 # ── 38. 채팅·메일 작성에서 팀원에게 메일을 보낼 때 첨부파일도 함께 발송 ──
 import mimetypes
 from email.mime.multipart import MIMEMultipart
@@ -3929,7 +3990,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v11 · 2026-11-05 (완료율 설정·업무 삭제·취소 없앰)")
+    st.caption("버전: v12 · 2026-11-05 (완료율 100%일 때만 완료)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
