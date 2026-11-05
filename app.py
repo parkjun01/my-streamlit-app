@@ -1231,7 +1231,10 @@ if ACCESS_PW and not ss.get("authenticated"):
 # ── 2. 작업공간 영구 저장 (SQLite: 업무·일정·대화·자료실·검토함 등) ───────
 DB_FILE = get_secret("ABLE_DB", "able_workspace.sqlite3")
 WS_KEYS = ["tasks", "schedule", "messages", "conversations", "conv_id", "library",
-           "candidates", "changes", "mail_drafts"]
+           "candidates", "changes", "mail_drafts", "contacts", "sent"]
+# Supabase(PostgreSQL) 연결 주소가 Secrets에 있으면 Supabase에, 없으면 서버 안 SQLite 파일에 저장
+DB_URL = get_secret("DATABASE_URL") or get_secret("SUPABASE_DB_URL")
+DB_KIND = "Supabase(PostgreSQL)" if DB_URL else "SQLite 파일"
 
 
 def _enc(o):
@@ -1254,7 +1257,36 @@ def _dec(d):
     return d
 
 
+@st.cache_resource(show_spinner=False)
+def _pg_connect(url):
+    import psycopg
+    con = psycopg.connect(url, autocommit=True, prepare_threshold=None, connect_timeout=15)
+    con.execute("CREATE TABLE IF NOT EXISTS able_state (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated TEXT)")
+    return con
+
+
+class _PgDB:
+    # SQLite와 같은 방식(execute·commit·close)으로 쓸 수 있게 감싼 PostgreSQL 연결
+    def __init__(self, con):
+        self.con = con
+
+    def execute(self, sql, args=()):
+        return self.con.execute(sql.replace("?", "%s"), args)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass  # 연결은 앱 전체에서 재사용
+
+
 def ws_db():
+    if DB_URL:
+        con = _pg_connect(DB_URL)
+        if con.closed or con.broken:  # 연결이 끊겼으면 다시 연결
+            _pg_connect.clear()
+            con = _pg_connect(DB_URL)
+        return _PgDB(con)
     con = sqlite3.connect(DB_FILE, timeout=15)
     con.execute("CREATE TABLE IF NOT EXISTS able_state (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated TEXT)")
     return con
@@ -2201,8 +2233,12 @@ def page_settings():
         st.button("♻️ 백업에서 복원", on_click=restore_backup)
         st.caption("백업에는 대화·업무·일정·자료·연락처가 들어갑니다. API 키와 비밀번호는 들어가지 않습니다.")
     with st.expander("ℹ️ 저장 방식 안내"):
-        st.write(f"작업공간 저장 파일: `{os.path.abspath(DB_FILE)}` (SQLite)")
-        st.caption("같은 서버에서는 새로고침·재접속해도 유지됩니다. Streamlit Cloud는 재배포·재시작 때 파일이 지워질 수 있으니 백업 ZIP을 받아 두세요.")
+        if DB_URL:
+            st.success("🗄️ Supabase(PostgreSQL)에 저장 중입니다. 재배포·재시작해도 계정·업무·대화가 유지됩니다.")
+        else:
+            st.write(f"작업공간 저장 파일: `{os.path.abspath(DB_FILE)}` (SQLite)")
+            st.caption("같은 서버에서는 새로고침·재접속해도 유지됩니다. Streamlit Cloud는 재배포·재시작 때 파일이 지워질 수 있으니 "
+                       "Secrets에 DATABASE_URL(Supabase 연결 주소)을 넣거나 백업 ZIP을 받아 두세요.")
 
 
 # ── 15. 업무 상세 드롭다운 (상세 내용·기한·중간 점검·결과물·근거 + 수정 폼) ──
@@ -2672,7 +2708,7 @@ def ws_sync():
 import secrets as _secrets
 if "users" not in WS_KEYS:
     WS_KEYS.append("users")
-PER_USER_KEYS = ["messages", "conversations", "conv_id"]  # 대화는 사람마다 따로 저장
+PER_USER_KEYS = ["messages", "conversations", "conv_id", "settings"]  # 대화·설정은 사람마다 따로 저장
 for _k in PER_USER_KEYS:
     if _k in WS_KEYS:
         WS_KEYS.remove(_k)
@@ -2741,6 +2777,8 @@ def log_in():
     ss.messages = data.get(f"messages::{u['name']}", [])
     ss.conversations = data.get(f"conversations::{u['name']}", [])
     ss.conv_id = data.get(f"conv_id::{u['name']}", uuid.uuid4().hex)
+    if isinstance(data.get(f"settings::{u['name']}"), dict):
+        ss.settings.update(data[f"settings::{u['name']}"])  # 이 사람이 고른 모델·음성 등 설정 복원
     ss.suggestions = []
     ss.settings.update({"name": u["name"], "role": u.get("role") or ss.settings["role"], "team": u.get("team") or ss.settings["team"]})
     ss.menu = MENUS[0]
@@ -2788,6 +2826,7 @@ ws_sync()
 
 with st.sidebar:
     st.markdown(f"👤 **{ss.user}** 님 로그인 중")
+    st.caption(f"🗄️ 저장소: {DB_KIND}")
     st.button("로그아웃", on_click=log_out, key="logout_btn")
 
 
