@@ -3212,6 +3212,75 @@ def page_chat():
         st.header, st.chat_message = _h, _cm
 
 
+# ── 28. 채팅으로 이미지 만들기 ("고양이 그려줘", "신제품 포스터 이미지 만들어줘") ─────────
+IMAGE_RE = re.compile(r"(그림|이미지|일러스트|로고|포스터|사진|아이콘|캐릭터|배너|썸네일|삽화)"
+                      r".{0,15}(만들|생성|그려|그리|제작|뽑아|디자인)|그려\s*줘|그려\s*주|draw|image of", re.I)
+_v27_wants = WANTS_FILE_RE
+
+
+class _FileOrImage:
+    # 파일 생성 요청이거나 이미지 요청이면 결과물 만들기를 실행
+    def search(self, text_):
+        return IMAGE_RE.search(text_) or _v27_wants.search(text_)
+
+
+WANTS_FILE_RE = _FileOrImage()
+
+
+def gen_image(prompt):
+    model = ss.settings.get("image_model") or "gpt-image-1"
+    try:
+        r = client.images.generate(model=model, prompt=prompt, size="1024x1024", n=1)
+    except Exception:
+        if model == "dall-e-3":
+            raise
+        r = client.images.generate(model="dall-e-3", prompt=prompt, size="1024x1024", n=1, response_format="b64_json")
+    d = r.data[0]
+    if getattr(d, "b64_json", None):
+        return base64.b64decode(d.b64_json)
+    if getattr(d, "url", None):
+        return requests.get(d.url, timeout=60).content
+    raise ValueError("이미지 생성 결과가 비어 있습니다.")
+
+
+_v27_create_files = create_files
+
+
+def create_files(prompt, answer_):
+    # 문서·표 파일 요청이 아니고 그림 요청이면 바로 이미지를 만듦
+    if IMAGE_RE.search(prompt) and not re.search(r"엑셀|xlsx|csv|pdf|ppt|docx|워드|mp3|보고서 파일", prompt, re.I):
+        try:
+            data = gen_image(prompt)
+            f = add_to_library(f"이미지_{datetime.now():%m%d_%H%M%S}_{uuid.uuid4().hex[:4]}.png", data, "생성")
+            return [f["id"]], []
+        except Exception as e:
+            return [], ["이미지 생성 실패: " + diagnostic(e, "이미지 생성")["message"]
+                        + " (설정 > 고급 모델 설정에서 이미지 생성 모델을 확인하세요)"]
+    return _v27_create_files(prompt, answer_)
+
+
+_v27_base_system = base_system
+
+
+def base_system():
+    return (_v27_base_system() + "\n\n[이미지 요청 안내] 사용자가 그림·이미지·포스터 등을 만들어 달라고 하면, 앱이 이미지를 "
+            "따로 만들어 답변 아래에 보여 준다. '그릴 수 없다'고 하지 말고, 어떤 이미지를 만들지 1~2문장으로 짧게 설명하라.")
+
+
+# ── 29. AI 모델 목록에서 같은 모델이 두 번 나오지 않게 정리 ─────────────────────
+_seen_models = {}
+for _name in list(MODEL_MAP):
+    _mid = MODEL_MAP[_name]
+    if _mid and _mid in _seen_models:  # 이미 다른 이름으로 있는 모델이면 목록에서 뺌 (Luna 6 = GPT-4o mini)
+        del MODEL_MAP[_name]
+        if ss.settings.get("model") == _name:
+            ss.settings["model"] = _seen_models[_mid]
+    elif _mid:
+        _seen_models[_mid] = _name
+if ss.settings.get("model") not in MODEL_MAP:
+    ss.settings["model"] = "Luna 6"
+
+
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동 (새 디자인: 로고 · 팀 · 아이콘 메뉴 · 최근 대화 · 사용자)
 # ---------------------------------------------------------------------
