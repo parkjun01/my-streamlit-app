@@ -1299,7 +1299,7 @@ for _k, _v in {"conversations": [], "conv_id": uuid.uuid4().hex, "candidates": [
         ss[_k] = _v
 
 # 시연 준비: 이 버전이 처음 실행될 때 저장된 데이터(업무·대화·자료·연락처·계정 등)를 딱 한 번 모두 비움
-DEMO_RESET = "demo-reset-2026-11-05-b"  # 값을 바꾸면 배포 후 한 번 더 전체 초기화
+DEMO_RESET = "demo-reset-2026-11-05-c"  # 값을 바꾸면 배포 후 한 번 더 초기화 (연락처는 남김)
 
 
 def demo_reset_once():
@@ -1309,19 +1309,21 @@ def demo_reset_once():
         if done and done[0][0] == json.dumps(DEMO_RESET):
             con.close()
             return False
-        con.execute("DELETE FROM able_state")
+        con.execute("DELETE FROM able_state WHERE k <> ?", ("contacts",))  # 이메일 관리 연락처는 남김
         con.execute("INSERT INTO able_state(k, v, updated) VALUES(?,?,?)",
                     ("_demo_reset", json.dumps(DEMO_RESET), datetime.now().isoformat()))
         con.commit()
         con.close()
     except Exception:
         return False
-    try:
-        os.remove(DATA_FILE)  # 설정·연락처·보낸 메일 저장 파일도 지움
+    try:  # 설정·보낸 메일 저장 파일은 비우고 연락처만 남김
+        keep = load_data().get("contacts", [])
+        with open(DATA_FILE, "w", encoding="utf-8") as fp:
+            json.dump({"contacts": keep}, fp, ensure_ascii=False, indent=2, default=str)
     except OSError:
         pass
-    for _k, _v in _defaults().items():  # 이번 화면에 이미 불러온 값도 처음 상태로
-        if _k in ("settings", "contacts", "sent", "tasks", "schedule", "inbox", "library"):
+    for _k, _v in _defaults().items():  # 이번 화면에 이미 불러온 값도 처음 상태로 (연락처 제외)
+        if _k in ("settings", "sent", "tasks", "schedule", "inbox", "library"):
             ss[_k] = _v
     return True
 
@@ -1353,8 +1355,10 @@ if _mk and ss.get("_reset_seen") != _mk:
     _ws = ws_load()
     _empty = _defaults()
     for _k in WS_KEYS:
+        if _k == "contacts" and _k not in _ws:
+            continue  # 연락처는 저장된 것이 없으면 지금 값을 유지
         ss[_k] = _ws.get(_k, [] if _k != "conv_id" else uuid.uuid4().hex)
-    for _k in ("contacts", "sent", "inbox", "library", "tasks", "schedule"):
+    for _k in ("sent", "inbox", "library", "tasks", "schedule"):
         ss[_k] = _ws.get(_k, _empty[_k])
     ss.users = _ws.get("users", [])
     ss.pop("user", None)
@@ -4175,7 +4179,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v19 · 2026-11-05 (자주 쓰는 질문 + 첨부 파일)")
+    st.caption("버전: v20 · 2026-11-05 (연락처 빼고 다시 초기화)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
