@@ -4181,6 +4181,73 @@ def send_with_files():
     if files and not ss.notice.startswith("⚠️"):
         ss.mail_attach = []
         ss.notice += f" · 첨부 {len(files)}개"
+
+
+# ── 45. "방금 요약한 내용 메일로 보내줘": 직전 답변(요약 등) 전체와 만든 파일을 메일에 넣어 발송 ──
+REF_RE = re.compile(r"(위|이|그|방금|앞|아까|지금)\s*(의\s*)?(요약|정리|결과|답변|내용|분석|거|것).{0,25}(메일|이메일|보내|전달|공유)")
+SUM_RE = re.compile(r"(요약|정리)")
+ROUTER_PROMPT = ROUTER_PROMPT + """
+- 방금 대화에서 만든 결과(요약·정리·분석 등)를 메일로 보내 달라고 하면 body에는 짧은 인사와 무엇을 공유하는지만 쓰고
+  args에 "include_last": true를 넣어라. 그 결과 내용은 앱이 본문에 그대로 붙인다."""
+
+
+def last_answer():
+    # 현재 요청 바로 전의 에이블 답변
+    return next((m for m in reversed(ss.messages) if m["role"] == "assistant" and m.get("content")), None)
+
+
+def body_with_answer(body, answer):
+    if not answer or answer[:60] in body:
+        return body
+    lines = body.rstrip().splitlines()
+    me = ss.settings["name"]
+    sign = []
+    while lines and (not lines[-1].strip() or me in lines[-1] or lines[-1].strip() in ("감사합니다.", "감사합니다")):
+        sign.insert(0, lines.pop())  # 끝인사·서명은 맨 아래에 두기
+    while sign and not sign[0].strip():
+        sign.pop(0)
+    return "\n".join(lines + ["", "─" * 20, answer.strip(), "─" * 20, ""] + sign).strip()
+
+
+_v45_handle_turn = handle_turn
+
+
+def handle_turn(prompt, files):
+    ss["_turn_prompt"] = prompt
+    try:
+        return _v45_handle_turn(prompt, files)
+    finally:
+        ss.pop("_turn_prompt", None)
+
+
+_v45_tool_email = tool_email
+
+
+def tool_email(a):
+    prompt = ss.get("_turn_prompt", "")
+    docs = [f for f in ss.get("_turn_files") or [] if f.get("text") or f["name"].rsplit(".", 1)[-1].lower() in IMG_MIME]
+    if docs and SUM_RE.search(prompt):
+        # "이 회의록 요약해서 메일로 보내줘"처럼 한 번에 요청: 첨부 자료를 요약해서 본문에 넣음
+        parts = []
+        for f in docs[:3]:
+            try:
+                f["summary"] = f.get("summary") or summarize_file(f)
+                parts.append(f"[{f['name']} 요약]\n{f['summary']}")
+            except Exception:
+                pass
+        if parts:
+            a["body"] = body_with_answer(str(a.get("body") or ""), "\n\n".join(parts))
+            return _v45_tool_email(a)
+    prev = last_answer()
+    if prev and (a.get("include_last") or REF_RE.search(prompt)):
+        a["body"] = body_with_answer(str(a.get("body") or ""), prev["content"])
+        names = [f["name"] for f in files_by_ids(prev.get("outputs"))]  # 그 답변에서 만든 파일도 첨부
+        if names:
+            a["attach"] = list(a.get("attach") or []) + names
+    return _v45_tool_email(a)
+
+
+TOOLS["email"] = ("📧 이메일 도구", tool_email)
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동 (새 디자인: 로고 · 팀 · 아이콘 메뉴 · 최근 대화 · 사용자)
 # ---------------------------------------------------------------------
@@ -4213,7 +4280,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v21 · 2026-11-05 (연락처 팀원은 회원가입 없이 로그인)")
+    st.caption("버전: v22 · 2026-11-05 (채팅 결과를 메일로 전송)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
