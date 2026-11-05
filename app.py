@@ -949,11 +949,13 @@ def page_my_tasks():
         mine = [t for t in mine if t["상태"] == "완료"]
 
     for t in mine:
-        c1, c2, c3 = st.columns([5, 1.5, 1.5])
+        c1, c2, c3, c4 = st.columns([5, 1.5, 1.5, 0.5])
         c1.checkbox(t["업무"], value=t["상태"] == "완료", key=f"chk_{t['id']}",
                     on_change=toggle_task, args=(t["id"],))
         c2.markdown(f"`{dday(t['마감일'])}` {t['마감일']}")
         c3.markdown(f"{t['상태']} · {t['우선순위']}")
+        c4.button("🗑️", key=f"del_now_{t['id']}", on_click=delete_task_now, args=(t["id"],),
+                  help="바로 삭제", type="tertiary")
     if not mine:
         st.caption("해당하는 업무가 없습니다.")
 
@@ -2013,6 +2015,7 @@ def page_library():
         pick = st.selectbox("자료 선택", [f["id"] for f in items], key="lib_preview",
                             format_func=lambda x: next(f["name"] for f in items if f["id"] == x))
         f = next(x for x in items if x["id"] == pick)
+        render_summary(f)  # 미리보기 위에 AI 요약 표시
         ext = f["name"].rsplit(".", 1)[-1].lower()
         if ext in IMG_MIME:
             st.image(f["data"])
@@ -3563,6 +3566,56 @@ def page_team():
         st.caption("채팅 예시: '이 과장에게 회의 변경 메일 보내줘' · '최 팀장이랑 이 과장에게 보고 메일 보내줘' · '팀원 전체에게 공지 메일 보내줘'")
 
 
+# ── 33. 내 작업 바로 삭제 (확인 창·안내 문구 없이) ───────────────────────────
+def delete_task_now(tid):
+    t = next((x for x in ss.tasks if x["id"] == tid), None)
+    if t:
+        record_change(t, "삭제", t["업무"], "삭제됨")
+        ss.tasks = [x for x in ss.tasks if x["id"] != tid]
+        for k in [f"chk_{tid}", f"home_chk_{tid}"]:
+            ss.pop(k, None)
+
+
+# ── 34. 자료실 미리보기: 자료를 AI로 요약해서 보여 주기 (한 번 만든 요약은 저장) ────────
+SUMMARY_PROMPT = ("다음 자료를 한국어로 요약하라. 형식: 첫 줄에 '한 줄 요약: ...', 이어서 핵심 내용 3~5개를 '- '로 시작하는 짧은 문장으로. "
+                  "담당자·기한·금액·수치가 있으면 반드시 포함하고, 자료에 없는 내용은 만들지 마라.")
+
+
+def summarize_file(f):
+    ext = f["name"].rsplit(".", 1)[-1].lower()
+    if ext in IMG_MIME:
+        b64 = base64.b64encode(f["data"]).decode()
+        content = [{"type": "input_text", "text": "이 이미지의 내용을 요약해줘."},
+                   {"type": "input_image", "image_url": f"data:{IMG_MIME[ext]};base64,{b64}"}]
+    else:
+        content = f"[자료: {f['name']}]\n{f['text'][:20000]}"
+    return llm([{"role": "system", "content": SUMMARY_PROMPT}, {"role": "user", "content": content}])
+
+
+def clear_summary(fid):
+    for x in ss.library:
+        if x["id"] == fid:
+            x.pop("summary", None)
+
+
+def render_summary(f):
+    ext = f["name"].rsplit(".", 1)[-1].lower()
+    with st.container(border=True):
+        st.markdown("**📝 AI 요약**")
+        if not f.get("summary"):
+            if not (f.get("text") or ext in IMG_MIME):
+                st.caption("글자를 읽을 수 없는 자료라 요약할 수 없습니다.")
+                return
+            with st.spinner("자료를 요약하고 있습니다..."):
+                try:
+                    f["summary"] = summarize_file(f)
+                except Exception as e:
+                    st.caption("요약 실패: " + diagnostic(e, "자료 요약")["message"])
+                    return
+        st.markdown(f["summary"])
+        st.button("🔄 다시 요약", key=f"resum_{f['id']}", on_click=clear_summary, args=(f["id"],), type="tertiary")
+
+
 # ---------------------------------------------------------------------
 # 사이드바 + 페이지 이동 (새 디자인: 로고 · 팀 · 아이콘 메뉴 · 최근 대화 · 사용자)
 # ---------------------------------------------------------------------
@@ -3595,7 +3648,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v8 · 2026-11-05 (팀원에게 채팅 메일)")
+    st.caption("버전: v9 · 2026-11-05 (작업 바로 삭제·자료 요약)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
@@ -3605,6 +3658,8 @@ PAGES = {"🏠 홈": page_home, "💬 채팅": page_chat, "📁 자료실": page
          "📧 이메일 관리": page_email, "⚙️ 설정": page_settings}
 
 st.markdown(f'<div class="able-crumb">작업공간 / {html_lib.escape(ss.menu.split(" ", 1)[-1])}</div>', unsafe_allow_html=True)
+if ss.menu == "✅ 내 작업":  # 내 작업 화면에서는 오른쪽 위 실행 중 표시를 숨김
+    st.markdown('<style>[data-testid="stStatusWidget"]{display:none !important}</style>', unsafe_allow_html=True)
 PAGES[ss.menu]()
 save_data()
 ws_save()
