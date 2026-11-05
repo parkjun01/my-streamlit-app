@@ -112,7 +112,7 @@ LEGACY_MODELS = {"gpt-4"}  # 이미지·PDF 직접 분석과 JSON 모드를 지�
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICES = ["alloy", "nova", "shimmer", "coral", "echo", "onyx", "fable"]
 MENUS = ["🏠 홈", "💬 채팅", "📁 자료실", "✅ 내 작업", "👥 팀 업무 현황", "📧 이메일 관리", "⚙️ 설정"]
-QUICK_PROMPTS = ["📝 회의록 요약해줘", "📅 오늘 일정 정리해줘",
+QUICK_PROMPTS = ["📝 회의록 요약해줘", "📋 회의록에서 업무 뽑아서 내 작업에 추가해줘", "📅 오늘 일정 정리해줘",
                  "✅ 우선순위 높은 업무 알려줘", "📊 캠페인 성과 분석 방법 알려줘"]
 CHAT_TYPES = ["pdf", "png", "jpg", "jpeg", "webp", "txt", "md", "csv", "docx"]
 IMG_MIME = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
@@ -1628,11 +1628,9 @@ def page_my_tasks():
     _base_page_my_tasks()
     st.divider()
     mine = [t for t in ss.tasks if t["담당자"] == ss.settings["name"]]
-    t1, t2, t3 = st.tabs(["📋 상태 보드", f"📥 검토함 ({len(ss.candidates)})", "🕘 변경 기록"])
+    t1, t3 = st.tabs(["📋 상태 보드", "🕘 변경 기록"])
     with t1:
         task_board(mine, "my")
-    with t2:
-        candidates_ui()
     with t3:
         changes_ui()
 
@@ -1891,7 +1889,7 @@ def render_more(i, m):
             st.image(f["data"])
         st.download_button(f"📄 {f['name']}", f["data"], file_name=f["name"], key=f"out_{i}_{fid}")
     for w in m.get("warnings", []):
-        st.warning(w)
+        (st.success if w.startswith("✅") else st.warning)(w)
     a, b = st.columns(2)
     if a.button("🔊 음성으로 듣기", key=f"listen_{i}"):
         speak(m["content"], force=True)
@@ -2589,11 +2587,10 @@ def page_chat():
                     with st.spinner("요청한 결과 파일을 만들고 있습니다..."):
                         last["outputs"], errs = create_files(prompt, last["content"])
                     warnings += errs
-                if re.search(r"회의|업무|할 ?일|담당|기한", prompt):
-                    with st.spinner("자료에서 업무 후보를 찾고 있습니다..."):
-                        n = extract_candidates(prompt, files)
-                    if n:
-                        warnings.append(f"업무 후보 {n}건을 '내 작업 > 📥 검토함'에 저장했습니다. 근거를 확인한 뒤 반영하세요.")
+                if TASK_PULL_RE.search(prompt):
+                    with st.spinner("자료에서 업무를 찾아 바로 추가하고 있습니다..."):
+                        added = add_tasks_from_docs(prompt, files)
+                    warnings.append(added)
                 last["warnings"] = warnings
                 render_more(len(ss.messages) - 1, last)  # 답변 바로 아래에 버튼(내 작업에 추가·음성·메일)을 바로 표시
         archive_current()
@@ -3893,6 +3890,49 @@ def page_team():
         st.button("🧹 진행 중 업무 비우기", on_click=clear_in_progress, disabled=n == 0, key="clear_prog")
 
 
+# ── 44. 검토함 없앰: 채팅에서 자료(회의록 등)의 업무를 뽑으면 바로 업무로 추가 ──
+TASK_PULL_RE = re.compile(r"(업무|할 ?일|작업|액션 ?아이템).{0,15}(뽑|추출|찾아|정리|추가|등록|넣어|반영)|담당자별")
+ROUTER_PROMPT = ROUTER_PROMPT + """
+- 자료·회의록에서 업무를 뽑아 추가/정리해 달라는 요청(예: "회의록에서 업무 뽑아서 내 작업에 추가해줘")은 task가 아니라 chat이다."""
+
+
+def add_tasks_from_docs(prompt, files):
+    # 업무를 뽑아 검토 없이 바로 업무 목록에 넣음 (담당자가 없으면 나, 이미 있는 업무는 건너뜀)
+    before = len(ss.candidates)
+    n = extract_candidates(prompt, files)
+    if not n:
+        if not ([f for f in files if f.get("text")] or [f for f in ss.library if f["rag"] and f["text"]]):
+            return "업무를 뽑을 자료가 없습니다. 회의록을 첨부하거나 자료실에 올린 뒤 다시 요청해 주세요."
+        return "자료에서 담당자가 정해진 업무를 찾지 못했습니다."
+    new = ss.candidates[before:]
+    have = {(re.sub(r"\s+", "", t["업무"]), t["담당자"]) for t in ss.tasks}
+    me, mine, others, skipped = ss.settings["name"], [], [], 0
+    for c in new:
+        key = (re.sub(r"\s+", "", c["title"]), c.get("owner") or me)
+        if key in have:
+            skipped += 1
+            ss.candidates = [x for x in ss.candidates if x["id"] != c["id"]]
+            continue
+        have.add(key)
+        accept_candidate(c["id"])
+        t = ss.tasks[-1]
+        ss.changes[-1]["이후"] = f"채팅에서 바로 추가 (근거: {c.get('source', '')})"
+        (mine if t["담당자"] == me else others).append(t)
+    if not (mine or others):
+        return f"새로 추가할 업무가 없습니다. 자료의 업무 {skipped}건은 이미 등록되어 있습니다."
+    msg = f"✅ 업무 {len(mine) + len(others)}건을 바로 추가했습니다"
+    if mine:
+        msg += f" · 내 작업 {len(mine)}건: " + ", ".join(t["업무"] for t in mine[:5])
+    if others:
+        msg += f" · 다른 팀원 {len(others)}건(팀 업무 현황에서 확인): " + ", ".join(f"{t['담당자']}-{t['업무']}" for t in others[:5])
+    if skipped:
+        msg += f" · 이미 있는 업무 {skipped}건은 건너뜀"
+    return msg
+
+
+ss.candidates = []  # 예전 검토함에 남아 있던 후보는 쓰지 않음
+
+
 # ── 38. 채팅·메일 작성에서 팀원에게 메일을 보낼 때 첨부파일도 함께 발송 ──
 import mimetypes
 from email.mime.multipart import MIMEMultipart
@@ -4078,8 +4118,8 @@ with st.sidebar:
     u2.selectbox("AI 모델", list(MODEL_MAP), key="sb_model", on_change=change_model, label_visibility="collapsed")
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
-    st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v14 · 2026-11-05 (샘플 데이터 삭제·음성 한국어)")
+    st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
+    st.caption("버전: v15 · 2026-11-05 (검토함 없이 업무 바로 추가)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
