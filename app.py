@@ -738,18 +738,6 @@ def page_home():
         st.subheader("📊 상태별 업무")
         st.bar_chart(pd.DataFrame(ss.tasks)["상태"].value_counts())
 
-    st.subheader("🤖 AI 업무 브리핑")
-    if st.button("오늘의 브리핑 받기"):
-        with st.spinner("오늘의 우선순위를 분석하고 있습니다..."):
-            try:
-                ss.briefing = llm([{"role": "system", "content": base_system()},
-                                   {"role": "user", "content": "오늘 일정과 내 미완료 업무를 보고 마감일·우선순위를 고려해 "
-                                    "가장 효율적인 업무 순서를 번호 목록으로 제안하고, 업무마다 한 줄 가이드를 붙여줘."}])
-            except Exception as e:
-                ss.briefing = f"⚠️ 브리핑 생성 중 오류가 발생했습니다. 다시 시도해 주세요. ({e})"
-    if ss.briefing:
-        st.info(ss.briefing)
-
     st.subheader("⚡ 빠른 실행")
     q = st.columns(4)
     q[0].button("🎤 음성 비서", on_click=go, args=("💬 채팅", None, True))
@@ -3026,6 +3014,17 @@ def file_badge(name):
 _v4_page_home = page_home
 
 
+def make_briefing():
+    try:
+        with st.spinner("오늘의 우선순위를 분석하고 있습니다..."):
+            ss.briefing = llm([{"role": "system", "content": base_system()},
+                               {"role": "user", "content": "오늘 일정과 내 미완료 업무를 보고 마감일·우선순위를 고려해 "
+                                "가장 효율적인 업무 순서를 번호 목록으로 제안하고, 업무마다 한 줄 가이드를 붙여줘. "
+                                "업무가 없으면 업무가 없다고 짧게 말해줘."}])
+    except Exception as e:
+        ss.briefing = f"⚠️ 브리핑 생성 중 오류가 발생했습니다. 다시 시도해 주세요. ({e})"
+
+
 def page_home():
     s = ss.settings
     top_l, top_r = st.columns([3, 2], vertical_alignment="bottom")
@@ -3087,21 +3086,15 @@ def page_home():
         if not mine:
             st.caption("확인할 업무가 없습니다. 오른쪽 위 '＋ 새 업무'로 추가해 보세요.")
 
-    with st.container(border=True):
-        st.markdown('<div class="able-card-h">최근 자료</div>', unsafe_allow_html=True)
-        recent = sorted(ss.library, key=lambda f: f.get("created", ""), reverse=True)[:5]
-        for f in recent:
-            a, b, c = st.columns([6, 3, 0.7], vertical_alignment="center")
-            a.markdown(f'<div class="able-file"><i>{file_badge(f["name"])}</i>{html_lib.escape(f["name"])}</div>',
-                       unsafe_allow_html=True)
-            b.markdown(f'<div class="able-meta">수정일 {f.get("created", "")}</div>', unsafe_allow_html=True)
-            with c.popover("⋯"):
-                st.download_button("다운로드", f["data"], file_name=f["name"], key=f"rd_{f['id']}")
-                st.button("대화에 활용", key=f"ru_{f['id']}", on_click=lib_attach, args=(f["id"],))
-        if not recent:
-            st.caption("아직 자료가 없습니다. 채팅이나 자료실에서 파일을 올리면 여기에 보입니다.")
+    with st.container(border=True):  # 최근 자료 대신 AI 업무 브리핑
+        st.markdown('<div class="able-card-h">AI 업무 브리핑</div>', unsafe_allow_html=True)
+        st.button("✨ 오늘의 브리핑 받기", key="home_brief", on_click=make_briefing)
+        if ss.briefing:
+            st.info(ss.briefing)
+        else:
+            st.caption("오늘 일정과 내 미완료 업무를 보고 효율적인 업무 순서와 한 줄 가이드를 정리해 드립니다.")
 
-    with st.expander("📊 전체 대시보드 · AI 브리핑 · 빠른 실행 · 월간 달력 · 일정 편집"):
+    with st.expander("📊 전체 대시보드 · 빠른 실행 · 월간 달력 · 일정 편집"):
         _h = st.header
         st.header = lambda *a, **k: None
         try:
@@ -4149,7 +4142,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v16 · 2026-11-05 (시연용 데이터 전체 초기화)")
+    st.caption("버전: v17 · 2026-11-05 (홈에 AI 업무 브리핑)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
