@@ -902,17 +902,11 @@ def page_library():
     st.header("📁 자료실")
     show_notice()
 
-    tab1, tab2, tab3 = st.tabs(["⬆️ 파일 업로드", "📂 폴더에서 가져오기", "✍️ 텍스트 붙여넣기"])
+    tab1, tab3 = st.tabs(["⬆️ 파일 업로드", "✍️ 텍스트 붙여넣기"])
     with tab1:
         st.file_uploader("자료 추가", type=CHAT_TYPES, accept_multiple_files=True, key=f"lib_up_{ss.lib_key}")
         st.button("➕ 자료실에 추가", on_click=lib_upload)
-        st.caption("업로드 오류가 나면 '폴더에서 가져오기'나 '텍스트 붙여넣기'를 사용하세요.")
-    with tab2:
-        os.makedirs(LIB_DIR, exist_ok=True)
-        st.write(f"이 폴더에 파일을 넣은 뒤 버튼을 누르세요: `{os.path.abspath(LIB_DIR)}`")
-        found = [fn for fn in sorted(os.listdir(LIB_DIR)) if fn.rsplit(".", 1)[-1].lower() in CHAT_TYPES]
-        st.caption("폴더 안 파일: " + (", ".join(found) if found else "없음"))
-        st.button("📂 폴더 파일 불러오기", on_click=lib_import_folder)
+        st.caption("업로드 오류가 나면 '텍스트 붙여넣기'를 사용하세요.")
     with tab3:
         st.text_input("파일 이름", key="lib_text_name", placeholder="예: 11월_마케팅회의록")
         st.text_area("내용", key="lib_text_body", height=200, placeholder="회의록이나 참고 자료를 붙여 넣으세요.")
@@ -938,6 +932,18 @@ def page_library():
 # ---------------------------------------------------------------------
 # 페이지: 내 작업 / 팀 업무 현황
 # ---------------------------------------------------------------------
+def set_task_pct(tid, key):
+    t = next((x for x in ss.tasks if x["id"] == tid), None)
+    if t:
+        new = int(ss[key])
+        record_change(t, "진행률", t.get("진행률", 0), new)
+        t["진행률"] = new
+        if new == 100:  # 100%가 되면 완료로 바꿈
+            record_change(t, "상태", t["상태"], "완료")
+            t["상태"] = "완료"
+            ss.pop(f"chk_{tid}", None)
+
+
 def page_my_tasks():
     me = ss.settings["name"]
     st.header("✅ 내 작업")
@@ -954,8 +960,10 @@ def page_my_tasks():
                     on_change=toggle_task, args=(t["id"],))
         c2.markdown(f"`{dday(t['마감일'])}` {t['마감일']}")
         c3.markdown(f"{t['상태']} · {t['우선순위']}")
-        if t["상태"] == "진행 중":
-            c3.progress(int(t.get("진행률", 0)), text=f"완료율 {int(t.get('진행률', 0))}%")
+        if t["상태"] == "진행 중":  # 진행 중이면 완료율을 바로 보고 움직여서 바꿀 수 있음
+            pct = int(t.get("진행률", 0))
+            c3.slider("완료율", 0, 100, pct, step=5, format="%d%%", key=f"pct_{t['id']}_{pct}",
+                      on_change=set_task_pct, args=(t["id"], f"pct_{t['id']}_{pct}"))
         c4.button("🗑️", key=f"del_now_{t['id']}", on_click=delete_task_now, args=(t["id"],),
                   help="바로 삭제", type="tertiary")
     if not mine:
@@ -1513,7 +1521,7 @@ def delete_conv(cid):
 
 
 # ── 8. 업무 변경 기록 · 상태 보드 · 업무 후보 검토함 ────────────────────
-STATUS_LIST = ["대기", "진행 중", "완료", "취소"]
+STATUS_LIST = ["대기", "진행 중", "완료"]  # 취소 상태는 쓰지 않음
 
 
 def record_change(task, field, before, after):
@@ -1550,7 +1558,7 @@ def board_delete(tid):
 
 def task_board(tasks, prefix):
     cols = st.columns(3)
-    for col, group in zip(cols, [["대기"], ["진행 중"], ["완료", "취소"]]):
+    for col, group in zip(cols, [["대기"], ["진행 중"], ["완료"]]):
         with col:
             st.markdown(f"**{' / '.join(group)}**")
             for t in [x for x in tasks if x["상태"] in group]:
@@ -1561,6 +1569,11 @@ def task_board(tasks, prefix):
                     ss[k], ss[kd], ss[kp] = t["상태"], t["마감일"], t["우선순위"]  # 다른 화면에서 바뀐 값과 맞춤
                     st.selectbox("상태", STATUS_LIST, key=k, on_change=board_set, args=(t["id"], "상태", k),
                                  label_visibility="collapsed")
+                    if t["상태"] == "진행 중":  # 진행 중이면 완료율 설정
+                        pct = int(t.get("진행률", 0))
+                        kpct = f"{prefix}_pct_{t['id']}_{pct}"
+                        st.slider("완료율", 0, 100, pct, step=5, format="%d%%", key=kpct,
+                                  on_change=set_task_pct, args=(t["id"], kpct))
                     with st.expander("✏️ 수정"):
                         st.date_input("마감일", key=kd, on_change=board_set, args=(t["id"], "마감일", kd))
                         st.selectbox("우선순위", ["높음", "보통", "낮음"], key=kp, on_change=board_set,
@@ -2317,6 +2330,7 @@ def task_detail(t, prefix):
                         record_change(t, field, t.get(field, ""), value)
                         t[field] = value
                     st.rerun()
+        st.button("🗑️ 업무 삭제", key=f"{prefix}_rm_{t['id']}", on_click=delete_task_now, args=(t["id"],))
         st.button("💬 이 업무로 대화하기", key=f"{prefix}_talk_{t['id']}", on_click=go,
                   args=("💬 채팅", f"'{t['업무']}' 업무(담당 {t['담당자']}, 기한 {t.get('기한 설명') or t['마감일']}, "
                                   f"내용: {t.get('상세', '')})를 어떻게 진행하면 좋을지 단계별로 알려줘"))
@@ -3601,7 +3615,7 @@ ROUTER_PROMPT = ROUTER_PROMPT.replace("intent는 chat | email | calendar | task 
                                       "intent는 chat | email | calendar | task | task_edit | translate 중 하나.") + """
 - task_edit: 이미 있는 업무를 고치거나 지우는 요청(예: "보고서 업무 마감 금요일로 바꿔줘", "광고 업무 완료로 해줘", "회의록 정리 업무 삭제해줘").
   args: {"target": [업무 목록]에 있는 업무명 그대로, "changes": {바꿀 항목만: "업무"(새 업무명), "담당자", "마감일"("YYYY-MM-DD"),
-  "상태"("대기|진행 중|완료|취소"), "우선순위"("높음|보통|낮음"), "진행률"(완료율 0~100 숫자, 예: "60% 했어"→60), "상세", "중간 점검", "결과물"}, "delete": 지우라는 요청이면 true}
+  "상태"("대기|진행 중|완료"), "우선순위"("높음|보통|낮음"), "진행률"(완료율 0~100 숫자, 예: "60% 했어"→60), "상세", "중간 점검", "결과물"}, "delete": 지우라는 요청이면 true}
   새 업무를 만드는 요청이면 task_edit이 아니라 task다."""
 
 
@@ -3721,6 +3735,12 @@ def page_chat():
 MODEL_MAP.pop("✏️ 직접 입력", None)
 if ss.settings.get("model") not in MODEL_MAP:
     ss.settings["model"] = next(iter(MODEL_MAP))
+
+
+# ── 39. '취소' 상태 없앰: 예전에 취소로 저장된 업무는 '대기'로 돌려 보드·목록에 보이게 함 ──
+for _t in ss.tasks:
+    if _t.get("상태") == "취소":
+        _t["상태"] = "대기"
 
 
 # ── 38. 채팅·메일 작성에서 팀원에게 메일을 보낼 때 첨부파일도 함께 발송 ──
@@ -3909,7 +3929,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v10 · 2026-11-05 (채팅 업무 편집·파일 끌어다 놓기·메일 첨부)")
+    st.caption("버전: v11 · 2026-11-05 (완료율 설정·업무 삭제·취소 없앰)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
