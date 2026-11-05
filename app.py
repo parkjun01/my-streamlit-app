@@ -2646,8 +2646,7 @@ def page_chat():
                     if n:
                         warnings.append(f"업무 후보 {n}건을 '내 작업 > 📥 검토함'에 저장했습니다. 근거를 확인한 뒤 반영하세요.")
                 last["warnings"] = warnings
-                if last.get("outputs") or warnings:
-                    render_more(len(ss.messages) - 1, last)
+                render_more(len(ss.messages) - 1, last)  # 답변 바로 아래에 버튼(내 작업에 추가·음성·메일)을 바로 표시
         archive_current()
 
     if ss.suggestions:
@@ -2824,10 +2823,6 @@ if not ss.get("user"):
 
 ws_sync()
 
-with st.sidebar:
-    st.markdown(f"👤 **{ss.user}** 님 로그인 중")
-    st.caption(f"🗄️ 저장소: {DB_KIND}")
-    st.button("로그아웃", on_click=log_out, key="logout_btn")
 
 
 # ── 26. 팀 업무 현황표 · 팀원별 업무 추가 ─────────────────────────────────
@@ -2918,26 +2913,337 @@ def page_team():
         st.header = _h
 
 
+# ── 27. 새 화면 디자인 (차분한 흰색·회색 톤, 카드형 홈, 아이콘 메뉴) ─────────────────
+st.markdown("""<style>
+:root{--ink:#1C1C1C;--muted:#77756F;--line:#E8E6E1;--soft:#F6F5F2;--hover:#EEECE8;--pick:#E7E4DE}
+.stApp{background:#FFFFFF;color:var(--ink)}
+header[data-testid="stHeader"]{background:transparent}
+[data-testid="stMainBlockContainer"]{padding-top:2.2rem;max-width:1180px}
+[data-testid="stSidebar"]{background:var(--soft);border-right:1px solid var(--line)}
+[data-testid="stSidebar"] [data-testid="stSidebarUserContent"]{padding-top:1rem}
+/* 메뉴: 동그라미 없이, 선택된 항목은 배경 강조 */
+[data-testid="stSidebar"] [role="radiogroup"]{gap:2px}
+[data-testid="stSidebar"] [role="radiogroup"] label{width:100%;padding:.42rem .65rem;border-radius:8px;margin:0}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover{background:var(--hover)}
+[data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"]{background:var(--pick);font-weight:600}
+[data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div:first-child{display:none}
+[data-testid="stSidebar"] .stButton button[kind="tertiary"]{justify-content:flex-start;color:#3F3E3B;padding:.25rem .4rem;min-height:2rem}
+[data-testid="stSidebar"] .stButton button[kind="tertiary"] p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
+.able-logo{display:flex;align-items:center;gap:.5rem;font-size:1.05rem;font-weight:600;margin:.1rem 0 .8rem}
+.able-logo b{font-family:Georgia,serif;font-size:1.6rem;font-weight:700;line-height:1}
+.able-side-h{font-size:.78rem;color:var(--muted);margin:.9rem 0 .2rem .2rem}
+.able-crumb{font-size:.8rem;color:var(--muted);margin-bottom:.4rem}
+.able-title{font-size:2rem;font-weight:700;letter-spacing:-.03em;line-height:1.25}
+.able-sub{color:var(--muted);font-size:.9rem;margin-top:.2rem}
+.able-card-h{font-weight:700;font-size:1.02rem;margin-bottom:.4rem}
+/* 버튼·카드·입력창 */
+.stButton>button,.stDownloadButton>button,[data-testid="stPopover"] button{border-radius:8px;border-color:var(--line)}
+.stButton>button[kind="primary"],[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]{background:#1C1C1C !important;border-color:#1C1C1C !important;color:#fff}
+[data-testid="stVerticalBlockBorderWrapper"]{border-color:var(--line) !important;border-radius:12px !important}
+[data-testid="stChatMessage"]{background:#FFFFFF;border:none;border-bottom:1px solid var(--line);border-radius:0;padding:1rem .2rem}
+[data-testid="stChatInput"]{border:1px solid var(--line);border-radius:14px;background:#fff}
+h2{font-size:1.55rem !important;letter-spacing:-.02em}
+/* 홈 미니 달력 */
+.able-mini{width:100%;border-collapse:collapse;text-align:center;font-size:.86rem;border:none !important}
+.able-mini tr,.able-mini th,.able-mini td{border:none !important;background:transparent !important}
+.able-task{font-size:.92rem;padding-top:.15rem}
+[data-testid="stCheckbox"] label{align-items:center}
+[data-testid="stCheckbox"] label > span + div{width:1.05rem !important;height:1.05rem !important;min-height:0 !important;flex:none !important;border-radius:4px !important}
+.able-mini th{color:var(--muted);font-weight:500;padding:.25rem 0}
+.able-mini td{padding:.28rem 0;color:#3F3E3B}
+.able-mini td.out{color:#C9C6C0}
+.able-mini td span{display:inline-block;width:1.8rem;height:1.8rem;line-height:1.8rem;border-radius:50%}
+.able-mini td.today span{background:#1C1C1C;color:#fff;font-weight:600}
+.able-mini td.has span{box-shadow:inset 0 -2px 0 #B9B5AD}
+.able-day-h{font-weight:700;margin-bottom:.3rem}
+.able-row{display:flex;gap:1rem;padding:.55rem 0;border-bottom:1px solid var(--line);font-size:.92rem}
+.able-row .t{color:#3F3E3B;min-width:3.2rem}
+.able-pill{display:inline-block;font-size:.72rem;padding:.08rem .5rem;border-radius:999px;background:#EFEDE9;color:#55534E;border:1px solid #E2DFD9;white-space:nowrap}
+.able-pill.p{background:#E8EEF6;color:#3B5677;border-color:#D6E0EC}
+.able-pill.d{background:#E9F3EC;color:#3C6B4A;border-color:#D5E8DA}
+.able-due{color:var(--muted);font-size:.85rem;text-align:right;white-space:nowrap}
+.able-file{display:flex;align-items:center;gap:.7rem;font-size:.92rem}
+.able-file i{font-style:normal;display:inline-block;width:1.6rem;text-align:center;border:1px solid #CFCBC4;border-radius:4px;font-size:.7rem;color:#55534E;padding:.05rem 0}
+.able-meta{color:var(--muted);font-size:.84rem;white-space:nowrap}
+</style>""", unsafe_allow_html=True)
+
+MENU_ICONS = {"🏠 홈": ":material/home: 홈", "💬 채팅": ":material/chat_bubble: 채팅",
+              "📁 자료실": ":material/folder: 자료실", "✅ 내 작업": ":material/check_box: 내 작업",
+              "👥 팀 업무 현황": ":material/bar_chart: 팀 업무 현황", "📧 이메일 관리": ":material/mail: 이메일 관리",
+              "⚙️ 설정": ":material/settings: 설정"}
+WEEKDAYS = "월화수목금토일"
+
+
+def due_label(d):
+    n = (d - TODAY).days
+    return {0: "오늘", 1: "내일", -1: "어제"}.get(n, f"{d.month}월 {d.day}일")
+
+
+def status_pill(s):
+    cls = {"진행 중": "p", "완료": "d"}.get(s, "")
+    return f'<span class="able-pill {cls}">{html_lib.escape(s)}</span>'
+
+
+# ── 홈 화면 ──────────────────────────────────────────────────────────
+def home_toggle(tid):
+    t = next((x for x in ss.tasks if x["id"] == tid), None)
+    if t:
+        before = t["상태"]
+        t["상태"] = "완료" if ss[f"home_chk_{tid}"] else "진행 중"
+        record_change(t, "상태", before, t["상태"])
+
+
+def quick_add_task():
+    title = ss.qt_title.strip()
+    if not title:
+        ss.notice = "⚠️ 업무명을 입력해 주세요."
+        return
+    t = {"id": uuid.uuid4().hex[:8], "업무": title, "담당자": ss.qt_owner, "마감일": ss.qt_due, "상태": "대기",
+         "우선순위": ss.qt_pr, "근거": f"{ss.settings['name']} 님이 홈에서 등록"}
+    ss.tasks.append(t)
+    record_change(t, "등록", "-", f"{t['담당자']}에게 배정")
+    ss.qt_title = ""
+    ss.notice = f"✅ '{title}' 업무를 추가했습니다."
+
+
+def quick_add_event():
+    title, start, dur = ss.qe_title.strip(), ss.qe_time.strftime("%H:%M"), int(ss.qe_dur)
+    if not title:
+        ss.notice = "⚠️ 일정 제목을 입력해 주세요."
+        return
+    clash = find_conflicts(ss.qe_day, start, dur)
+    ss.schedule.append({"일자": ss.qe_day, "시간": start, "일정": title, "소요": dur})
+    ss.qe_title = ""
+    ss.notice = f"📅 '{title}' 일정을 추가했습니다." + (f" (겹치는 일정: {', '.join(clash)})" if clash else "")
+
+
+def move_month(step):
+    m = ss.get("home_month", TODAY.replace(day=1))
+    y, mo = m.year + (m.month - 1 + step) // 12, (m.month - 1 + step) % 12 + 1
+    ss.home_month = date(y, mo, 1)
+
+
+def mini_calendar(month):
+    days_with = {e["일자"] for e in ss.schedule}
+    html_ = '<table class="able-mini"><tr>' + "".join(f"<th>{d}</th>" for d in "일월화수목금토") + "</tr>"
+    for week in calendar_lib.Calendar(firstweekday=6).monthdatescalendar(month.year, month.month):
+        html_ += "<tr>"
+        for d in week:
+            cls = " ".join(c for c in ["out" if d.month != month.month else "", "today" if d == TODAY else "",
+                                       "has" if d in days_with else ""] if c)
+            html_ += f'<td class="{cls}"><span>{d.day}</span></td>'
+        html_ += "</tr>"
+    st.markdown(html_ + "</table>", unsafe_allow_html=True)
+
+
+def file_badge(name):
+    ext = name.rsplit(".", 1)[-1].lower()
+    return {"docx": "W", "doc": "W", "xlsx": "X", "csv": "X", "tsv": "X", "pdf": "PDF", "pptx": "P",
+            "png": "IMG", "jpg": "IMG", "jpeg": "IMG", "webp": "IMG", "mp3": "♪", "wav": "♪", "m4a": "♪"}.get(ext, "T")
+
+
+_v4_page_home = page_home
+
+
+def page_home():
+    s = ss.settings
+    top_l, top_r = st.columns([3, 2], vertical_alignment="bottom")
+    with top_l:
+        st.markdown('<div class="able-title">오늘의 업무를 차분하게.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="able-sub">{TODAY.month}월 {TODAY.day}일 {WEEKDAYS[TODAY.weekday()]}요일 · '
+                    f'{html_lib.escape(s["name"])}님의 작업공간</div>', unsafe_allow_html=True)
+    with top_r:
+        b1, b2 = st.columns(2)
+        with b1.popover("＋ 새 업무", width="stretch"):
+            st.text_input("업무명", key="qt_title", placeholder="예: 주간 보고서 작성")
+            members = team_members()
+            ss.setdefault("qt_owner", s["name"] if s["name"] in members else members[0])
+            st.selectbox("담당자", members, key="qt_owner")
+            st.date_input("마감일", TODAY + timedelta(days=1), key="qt_due")
+            st.selectbox("우선순위", ["높음", "보통", "낮음"], index=1, key="qt_pr")
+            st.button("추가", type="primary", on_click=quick_add_task, key="qt_add")
+        with b2.popover(":material/calendar_month: 일정 추가", width="stretch"):
+            st.text_input("일정 제목", key="qe_title", placeholder="예: 팀 회의")
+            st.date_input("날짜", TODAY, key="qe_day")
+            st.time_input("시작", datetime.strptime("10:00", "%H:%M").time(), key="qe_time", step=1800)
+            st.number_input("소요 시간(분)", 15, 720, 60, 15, key="qe_dur")
+            st.button("추가", type="primary", on_click=quick_add_event, key="qe_add")
+    show_notice()
+
+    left, right = st.columns([1.35, 1])
+    with left, st.container(border=True):
+        st.markdown('<div class="able-card-h">이번 주 일정</div>', unsafe_allow_html=True)
+        cal, day = st.columns([1.15, 1])
+        with cal:
+            month = ss.get("home_month", TODAY.replace(day=1))
+            p, m, n = st.columns([1, 4, 1], vertical_alignment="center")
+            p.button("‹", key="m_prev", on_click=move_month, args=(-1,), type="tertiary")
+            m.markdown(f"<div style='text-align:center;font-weight:600'>{month.year}년 {month.month}월</div>", unsafe_allow_html=True)
+            n.button("›", key="m_next", on_click=move_month, args=(1,), type="tertiary")
+            mini_calendar(month)
+        with day:
+            st.markdown(f'<div class="able-day-h">{TODAY.month}월 {TODAY.day}일 {WEEKDAYS[TODAY.weekday()]}요일</div>',
+                        unsafe_allow_html=True)
+            todays = sorted([e for e in ss.schedule if e["일자"] == TODAY], key=lambda x: x["시간"])
+            if todays:
+                st.markdown("".join(f'<div class="able-row"><span class="t">{e["시간"]}</span>'
+                                    f'<span>{html_lib.escape(e["일정"])}</span></div>' for e in todays), unsafe_allow_html=True)
+            else:
+                st.caption("오늘 일정이 없습니다.")
+    with right, st.container(border=True):
+        st.markdown('<div class="able-card-h">우선 확인할 업무</div>', unsafe_allow_html=True)
+        order = {"높음": 0, "보통": 1, "낮음": 2}
+        mine = sorted([t for t in ss.tasks if t["담당자"] == s["name"] and t["상태"] not in ("완료", "취소")],
+                      key=lambda x: (x["마감일"], order.get(x["우선순위"], 1)))[:5]
+        for t in mine:
+            z, a, b, c = st.columns([0.5, 4.5, 1.6, 1.4])
+            ss[f"home_chk_{t['id']}"] = False
+            z.checkbox(t["업무"], key=f"home_chk_{t['id']}", on_change=home_toggle, args=(t["id"],),
+                       label_visibility="collapsed", help="체크하면 완료로 바뀝니다")
+            a.markdown(f'<div class="able-task">{html_lib.escape(t["업무"])}</div>', unsafe_allow_html=True)
+            b.markdown(status_pill(t["상태"]), unsafe_allow_html=True)
+            c.markdown(f'<div class="able-due">{due_label(t["마감일"])}</div>', unsafe_allow_html=True)
+        if not mine:
+            st.caption("확인할 업무가 없습니다. 오른쪽 위 '＋ 새 업무'로 추가해 보세요.")
+
+    with st.container(border=True):
+        st.markdown('<div class="able-card-h">최근 자료</div>', unsafe_allow_html=True)
+        recent = sorted(ss.library, key=lambda f: f.get("created", ""), reverse=True)[:5]
+        for f in recent:
+            a, b, c = st.columns([6, 3, 0.7], vertical_alignment="center")
+            a.markdown(f'<div class="able-file"><i>{file_badge(f["name"])}</i>{html_lib.escape(f["name"])}</div>',
+                       unsafe_allow_html=True)
+            b.markdown(f'<div class="able-meta">수정일 {f.get("created", "")}</div>', unsafe_allow_html=True)
+            with c.popover("⋯"):
+                st.download_button("다운로드", f["data"], file_name=f["name"], key=f"rd_{f['id']}")
+                st.button("대화에 활용", key=f"ru_{f['id']}", on_click=lib_attach, args=(f["id"],))
+        if not recent:
+            st.caption("아직 자료가 없습니다. 채팅이나 자료실에서 파일을 올리면 여기에 보입니다.")
+
+    with st.expander("📊 전체 대시보드 · AI 브리핑 · 빠른 실행 · 월간 달력 · 일정 편집"):
+        _h = st.header
+        st.header = lambda *a, **k: None
+        try:
+            _v4_page_home()
+        finally:
+            st.header = _h
+
+
+# ── 채팅: 제목·모델 선택 줄, 아바타, 표의 업무를 '내 작업에 추가' ───────────────
+def parse_due(text_):
+    text_ = str(text_).strip()
+    for word, n in (("오늘", 0), ("내일", 1), ("모레", 2)):
+        if word in text_:
+            return TODAY + timedelta(days=n)
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text_) or None
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.search(r"(\d{1,2})\s*[월/.]\s*(\d{1,2})", text_)
+    if m:
+        d = date(TODAY.year, int(m.group(1)), int(m.group(2)))
+        return d if d >= TODAY - timedelta(days=30) else date(TODAY.year + 1, d.month, d.day)
+    return TODAY + timedelta(days=7)
+
+
+def table_tasks(md):
+    lines = [l.strip() for l in md.splitlines() if l.strip().startswith("|")]
+    if len(lines) < 3:
+        return []
+    head = [c.strip() for c in lines[0].strip("|").split("|")]
+    find = lambda *names: next((i for i, h in enumerate(head) if any(n in h for n in names)), None)
+    ti, oi, di = find("업무", "할 일", "작업"), find("담당"), find("기한", "마감", "날짜")
+    if ti is None:
+        return []
+    rows = []
+    for l in lines[2:]:
+        cells = [c.strip() for c in l.strip("|").split("|")]
+        if ti < len(cells) and cells[ti]:
+            rows.append({"title": cells[ti],
+                         "owner": cells[oi] if oi is not None and oi < len(cells) and cells[oi] else ss.settings["name"],
+                         "due": parse_due(cells[di]) if di is not None and di < len(cells) else TODAY + timedelta(days=7)})
+    return rows
+
+
+def add_table_tasks(i):
+    m = ss.messages[i]
+    for r in table_tasks(m["content"]):
+        t = {"id": uuid.uuid4().hex[:8], "업무": r["title"], "담당자": r["owner"], "마감일": r["due"], "상태": "대기",
+             "우선순위": "보통", "근거": "채팅 답변의 표에서 추가"}
+        ss.tasks.append(t)
+        record_change(t, "등록", "-", "채팅 답변에서 추가")
+    m["tasks_added"] = True
+
+
+_v22_render_more = render_more
+
+
+def render_more(i, m):
+    rows = table_tasks(m.get("content", ""))
+    if rows:
+        if m.get("tasks_added"):
+            st.caption(f"✅ 업무 {len(rows)}건을 내 작업에 추가했습니다.")
+        else:
+            st.button(f"＋ 내 작업에 추가 ({len(rows)}건)", key=f"tbl_add_{i}", on_click=add_table_tasks, args=(i,))
+    if m.get("files_ref"):
+        st.caption("참고 자료 · " + ", ".join(m["files_ref"]))
+    _v22_render_more(i, m)
+
+
+def chat_model_changed():
+    ss.settings["model"] = ss.chat_model
+
+
+_v22_page_chat = page_chat
+AVATARS = {"user": ":material/person:", "assistant": ":material/auto_awesome:"}
+
+
+def page_chat():
+    title = next((x["content"][:30] for x in ss.messages if x["role"] == "user"), "새 대화")
+    a, b = st.columns([4, 1.3], vertical_alignment="bottom")
+    a.markdown(f'<div class="able-title" style="font-size:1.6rem">{html_lib.escape(title)}</div>', unsafe_allow_html=True)
+    ss.chat_model = ss.settings["model"]
+    b.selectbox("모델", list(MODEL_MAP), key="chat_model", on_change=chat_model_changed, label_visibility="collapsed")
+    _h, _cm = st.header, st.chat_message
+    st.header = lambda *a_, **k_: None
+    st.chat_message = lambda role, **k_: _cm(role, avatar=AVATARS.get(role, k_.get("avatar")))
+    try:
+        _v22_page_chat()
+    finally:
+        st.header, st.chat_message = _h, _cm
+
+
 # ---------------------------------------------------------------------
-# 사이드바 + 페이지 이동 (v4: 최근 대화 목록 · 잠금 추가)
+# 사이드바 + 페이지 이동 (새 디자인: 로고 · 팀 · 아이콘 메뉴 · 최근 대화 · 사용자)
 # ---------------------------------------------------------------------
-ss.sb_model = ss.settings["model"]  # 설정 화면과 사이드바 모델 선택을 맞춤
+ss.sb_model = ss.settings["model"]  # 설정 화면·채팅 화면과 사이드바 모델 선택을 맞춤
+
+
+def change_team():
+    ss.settings["team"] = ss.sb_team
+
 
 with st.sidebar:
-    st.markdown("## 🤖 에이블 (Able)")
-    st.caption(f"{ss.settings['name']} · {ss.settings['team']}")
-    st.button("➕ 새 대화", on_click=new_chat, type="primary")
-    st.radio("메뉴", MENUS, key="menu", label_visibility="collapsed")
+    st.markdown('<div class="able-logo"><b>A</b> 에이블 Able</div>', unsafe_allow_html=True)
+    teams = sorted({u.get("team") for u in ss.get("users", []) if u.get("team")} | {ss.settings["team"]})
+    ss.sb_team = ss.settings["team"]
+    st.selectbox("팀", teams, key="sb_team", on_change=change_team, label_visibility="collapsed")
+    st.button("＋ 새 대화", on_click=new_chat, width="stretch")
+    st.radio("메뉴", MENUS, key="menu", label_visibility="collapsed", format_func=lambda x: MENU_ICONS.get(x, x))
+    st.markdown('<div class="able-side-h">최근 대화</div>', unsafe_allow_html=True)
+    for c in ss.conversations[::-1][:8]:
+        a, b = st.columns([6, 1], gap=None)
+        a.button(f":material/chat_bubble_outline: {c['title']}", key=f"conv_{c['id']}", on_click=open_conv,
+                 args=(c["id"],), type="tertiary")
+        b.button("✕", key=f"convdel_{c['id']}", on_click=delete_conv, args=(c["id"],), type="tertiary", help="대화 삭제")
+    if not ss.conversations:
+        st.caption("새 대화를 누르면 지금 대화가 여기에 저장됩니다.")
     st.divider()
-    st.selectbox("🧠 AI 모델", list(MODEL_MAP), key="sb_model", on_change=change_model)
-    with st.expander(f"🕘 최근 대화 ({len(ss.conversations)})"):
-        for c in ss.conversations[::-1][:15]:
-            a, b = st.columns([5, 1])
-            a.button(c["title"], key=f"conv_{c['id']}", on_click=open_conv, args=(c["id"],))
-            b.button("✕", key=f"convdel_{c['id']}", on_click=delete_conv, args=(c["id"],))
-        if not ss.conversations:
-            st.caption("새 대화를 누르면 지금 대화가 여기에 저장됩니다.")
-    st.caption(f"💬 대화 {len(ss.messages)}개 · 📁 자료 {len(ss.library)}개 · 📇 연락처 {len(ss.contacts)}명 · 📥 검토 {len(ss.candidates)}건")
+    u1, u2 = st.columns([1, 1.2], vertical_alignment="center")
+    u1.markdown(f":material/person: **{ss.settings['name']}**")
+    u2.selectbox("AI 모델", list(MODEL_MAP), key="sb_model", on_change=change_model, label_visibility="collapsed")
+    if ss.get("user"):
+        st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
+    st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
@@ -2946,7 +3252,7 @@ PAGES = {"🏠 홈": page_home, "💬 채팅": page_chat, "📁 자료실": page
          "✅ 내 작업": page_my_tasks, "👥 팀 업무 현황": page_team,
          "📧 이메일 관리": page_email, "⚙️ 설정": page_settings}
 
-st.divider()
+st.markdown(f'<div class="able-crumb">작업공간 / {html_lib.escape(ss.menu.split(" ", 1)[-1])}</div>', unsafe_allow_html=True)
 PAGES[ss.menu]()
 save_data()
 ws_save()
