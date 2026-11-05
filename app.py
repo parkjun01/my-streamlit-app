@@ -1310,7 +1310,36 @@ for _k, _v in {"conversations": [], "conv_id": uuid.uuid4().hex, "candidates": [
     if _k not in ss:
         ss[_k] = _v
 
+# 시연 준비: 이 버전이 처음 실행될 때 저장된 데이터(업무·대화·자료·연락처·계정 등)를 딱 한 번 모두 비움
+DEMO_RESET = "demo-reset-2026-11-05"
+
+
+def demo_reset_once():
+    try:
+        con = ws_db()
+        done = con.execute("SELECT v FROM able_state WHERE k = ?", ("_demo_reset",)).fetchall()
+        if done and done[0][0] == json.dumps(DEMO_RESET):
+            con.close()
+            return False
+        con.execute("DELETE FROM able_state")
+        con.execute("INSERT INTO able_state(k, v, updated) VALUES(?,?,?)",
+                    ("_demo_reset", json.dumps(DEMO_RESET), datetime.now().isoformat()))
+        con.commit()
+        con.close()
+    except Exception:
+        return False
+    try:
+        os.remove(DATA_FILE)  # 설정·연락처·보낸 메일 저장 파일도 지움
+    except OSError:
+        pass
+    for _k, _v in _defaults().items():  # 이번 화면에 이미 불러온 값도 처음 상태로
+        if _k in ("settings", "contacts", "sent", "tasks", "schedule", "inbox", "library"):
+            ss[_k] = _v
+    return True
+
+
 if "ws_loaded" not in ss:
+    demo_reset_once()
     _ws = ws_load()
     for _k in WS_KEYS:
         if _k in _ws:
@@ -3823,9 +3852,10 @@ def reset_workspace():
     try:
         con = ws_db()
         if with_accounts:
-            con.execute("DELETE FROM able_state")
+            con.execute("DELETE FROM able_state WHERE k <> ?", ("_demo_reset",))
         else:  # 계정(users)과 사람별 설정은 남기고 나머지를 지움
-            con.execute("DELETE FROM able_state WHERE k <> ? AND k NOT LIKE ?", ("users", "settings::%"))
+            con.execute("DELETE FROM able_state WHERE k <> ? AND k <> ? AND k NOT LIKE ?",
+                        ("users", "_demo_reset", "settings::%"))
         con.commit()
         con.close()
     except Exception as e:
@@ -4119,7 +4149,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)}")
-    st.caption("버전: v15 · 2026-11-05 (검토함 없이 업무 바로 추가)")
+    st.caption("버전: v16 · 2026-11-05 (시연용 데이터 전체 초기화)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
