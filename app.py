@@ -127,49 +127,18 @@ CONFIRM_RE = re.compile(r"(보내|발송|전송|ㅇㅇ|^응|^네|^예|^좋아|^�
 
 
 # ---------------------------------------------------------------------
-# 상태 초기화 (샘플 데이터 포함)
+# 상태 초기화 (시연용으로 빈 상태에서 시작)
 # ---------------------------------------------------------------------
 def _defaults():
-    d = TODAY
     return {
         "menu": MENUS[0],
         "settings": {"name": "김 대리", "team": "마케팅팀", "role": "Marketing Data Analyst",
                      "model": "Luna 6", "common_prompt": "", "voice": "alloy",
                      "tts_on": True, "autoplay": True, "stt_lang": "ko", "auto_send": True},
-        "contacts": [
-            {"이름": "최 팀장", "이메일": "choi@company.com", "직책": "마케팅팀장"},
-            {"이름": "이 과장", "이메일": "lee@company.com", "직책": "과장"},
-            {"이름": "박 사원", "이메일": "park@company.com", "직책": "사원"},
-            {"이름": "정 실장", "이메일": "jung@agency.com", "직책": "광고대행사 실장"},
-        ],
-        "tasks": [
-            {"id": "t1", "업무": "SNS 광고 A/B 테스트 결과 분석", "담당자": "김 대리", "마감일": d, "상태": "진행 중", "우선순위": "높음"},
-            {"id": "t2", "업무": "11월 캠페인 성과 리포트 작성", "담당자": "김 대리", "마감일": d + timedelta(days=1), "상태": "진행 중", "우선순위": "높음"},
-            {"id": "t3", "업무": "신제품 런칭 보도자료 검토", "담당자": "김 대리", "마감일": d + timedelta(days=5), "상태": "대기", "우선순위": "보통"},
-            {"id": "t4", "업무": "고객 설문 데이터 정제", "담당자": "김 대리", "마감일": d - timedelta(days=1), "상태": "완료", "우선순위": "보통"},
-            {"id": "t5", "업무": "인플루언서 협업 리스트 정리", "담당자": "이 과장", "마감일": d + timedelta(days=2), "상태": "진행 중", "우선순위": "높음"},
-            {"id": "t6", "업무": "연말 프로모션 예산안 작성", "담당자": "최 팀장", "마감일": d + timedelta(days=7), "상태": "대기", "우선순위": "높음"},
-            {"id": "t7", "업무": "블로그 콘텐츠 3건 발행", "담당자": "박 사원", "마감일": d + timedelta(days=3), "상태": "진행 중", "우선순위": "보통"},
-            {"id": "t8", "업무": "경쟁사 가격 모니터링", "담당자": "박 사원", "마감일": d - timedelta(days=2), "상태": "완료", "우선순위": "낮음"},
-        ],
-        "schedule": [
-            {"일자": d, "시간": "09:30", "일정": "주간 마케팅 회의"},
-            {"일자": d, "시간": "11:00", "일정": "광고대행사 미팅"},
-            {"일자": d, "시간": "14:00", "일정": "캠페인 데이터 리뷰"},
-            {"일자": d, "시간": "16:30", "일정": "팀장님 주간 보고"},
-            {"일자": d + timedelta(days=1), "시간": "10:00", "일정": "신제품 기획 회의"},
-        ],
-        "inbox": [
-            {"id": "m1", "from": "최 팀장", "addr": "choi@company.com", "date": f"{d} 08:40",
-             "subject": "연말 프로모션 아이디어 요청",
-             "body": "김 대리님, 금요일까지 연말 프로모션 아이디어 3가지를 정리해서 공유 부탁드립니다."},
-            {"id": "m2", "from": "정 실장", "addr": "jung@agency.com", "date": f"{d} 07:55",
-             "subject": "오늘 11시 미팅 자료 송부",
-             "body": "안녕하세요, 오늘 미팅 때 논의할 4분기 매체 집행안을 미리 보내드립니다. 검토 부탁드립니다."},
-            {"id": "m3", "from": "이 과장", "addr": "lee@company.com", "date": f"{d - timedelta(days=1)} 18:10",
-             "subject": "인플루언서 후보 리스트 확인",
-             "body": "후보 리스트 1차 정리했습니다. 데이터 기준으로 우선순위 의견 주시면 반영하겠습니다."},
-        ],
+        "contacts": [],
+        "tasks": [],
+        "schedule": [],
+        "inbox": [],
         "sent": [],
         "smtp": {},
         "library": [],
@@ -1145,8 +1114,9 @@ def page_settings():
         voice = c4.selectbox("TTS 목소리", VOICES, index=VOICES.index(s["voice"]))
         tts_on = c5.toggle("답변 음성 재생", s["tts_on"])
         autoplay = c6.toggle("자동 재생", s["autoplay"])
-        langs = {"한국어": "ko", "English": "en", "日本語": "ja"}
-        lang = c7.selectbox("STT 언어", list(langs), index=list(langs.values()).index(s["stt_lang"]))
+        langs = {"한국어": "ko"}  # 음성 입력은 한국어로만 받음
+        lang = "한국어"
+        c7.markdown("**음성 입력 언어**  \n한국어")
 
         st.subheader("📮 메일 발송 (Gmail)")
         file_user, file_pw = read_key_file()
@@ -2225,16 +2195,6 @@ def page_settings():
 
 
 # ── 15. 업무 상세 드롭다운 (상세 내용·기한·중간 점검·결과물·근거 + 수정 폼) ──
-SAMPLE_DETAILS = {
-    "t1": {"상세": "광고 A/B안의 클릭률·전환율을 비교하고 우세안을 정리합니다.", "결과물": "비교표 XLSX와 1페이지 요약", "근거": "주간 마케팅 회의"},
-    "t2": {"상세": "11월 캠페인의 채널별 성과를 정리해 팀장님께 보고합니다.", "중간 점검": "초안 공유 후 피드백 반영", "결과물": "성과 리포트 PPT", "근거": "주간 마케팅 회의"},
-    "t3": {"상세": "보도자료 문구와 제품 정보가 맞는지 검토합니다.", "선행 조건": "제품팀 최종 스펙 확정", "근거": "신제품 기획 회의"},
-}
-for _t in ss.tasks:
-    for _k, _v in SAMPLE_DETAILS.get(_t["id"], {}).items():
-        _t.setdefault(_k, _v)
-
-
 def extract_candidates(prompt, files):
     # (상세 버전) 업무 후보에 상세 내용·중간 점검·결과물·선행 조건까지 함께 추출
     docs = list(files) + [f for f in ss.library if f["rag"] and f["text"] and f not in files]
@@ -3741,11 +3701,29 @@ def page_chat():
             ss.setdefault("_drop_box", []).extend(dropped)
         return sub
 
-    st.chat_input = chat_input_drop
+    _ai = st.audio_input
+
+    def audio_to_box(label, **kw):
+        # 채팅 화면의 다른 녹음 칸(음성 입력·＋ 메뉴 녹음)도 바로 보내지 않고 글자를 입력창에 채움
+        rec = _ai(label, **kw)
+        if rec is not None:
+            h = hashlib.md5(rec.getvalue()).hexdigest()
+            if h != ss.last_audio:
+                ss.last_audio = h
+                try:
+                    with st.spinner("말씀하신 내용을 글자로 바꾸는 중..."):
+                        ss["_mic_text"] = stt(rec.getvalue())
+                except Exception as e:
+                    st.toast("음성 인식 실패: " + diagnostic(e, "음성 인식")["message"])
+                    return None
+                st.rerun()
+        return None  # 녹음은 입력창으로만 전달 (자동 전송 안 함)
+
+    st.chat_input, st.audio_input = chat_input_drop, audio_to_box
     try:
         _v36_page_chat()
     finally:
-        st.chat_input = _ci
+        st.chat_input, st.audio_input = _ci, _ai
 
 
 # ── 37. 설정에서 고급 모델 설정·API 연결 확인을 뺐으므로 '직접 입력' 모델도 목록에서 뺌 ──
@@ -3816,6 +3794,103 @@ def tool_task_edit(a):
 
 
 TOOLS["task_edit"] = ("✏️ 업무 편집 도구", tool_task_edit)
+
+
+# ── 41. 시연 준비: 예전에 들어 있던 샘플 데이터 정리 + 설정에서 작업공간 초기화 ──
+SAMPLE_TASK_IDS = {f"t{i}" for i in range(1, 9)}
+SAMPLE_EMAILS = {"choi@company.com", "lee@company.com", "park@company.com", "jung@agency.com"}
+SAMPLE_EVENTS = {("09:30", "주간 마케팅 회의"), ("11:00", "광고대행사 미팅"), ("14:00", "캠페인 데이터 리뷰"),
+                 ("16:30", "팀장님 주간 보고"), ("10:00", "신제품 기획 회의")}
+
+
+def purge_samples():
+    # 이미 저장소에 들어간 샘플(업무 t1~t8·샘플 연락처·샘플 일정·샘플 받은 메일)만 골라 지움
+    ss.tasks = [t for t in ss.tasks if t.get("id") not in SAMPLE_TASK_IDS]
+    ss.contacts = [c for c in ss.contacts if c.get("이메일", "").lower() not in SAMPLE_EMAILS]
+    ss.schedule = [e for e in ss.schedule if (e.get("시간"), e.get("일정")) not in SAMPLE_EVENTS]
+    ss.inbox = [m for m in ss.get("inbox", []) if m.get("id") not in ("m1", "m2", "m3")]
+
+
+purge_samples()
+
+RESET_KEYS = {"tasks": [], "schedule": [], "library": [], "candidates": [], "changes": [], "mail_drafts": [],
+              "contacts": [], "sent": [], "inbox": [], "messages": [], "conversations": [], "attach_ids": [],
+              "suggestions": []}
+
+
+def reset_workspace():
+    if not ss.get("reset_ok"):
+        ss.notice = "⚠️ '모든 데이터를 지우는 것에 동의합니다'를 먼저 체크해 주세요."
+        return
+    with_accounts = ss.get("reset_accounts", False)
+    try:
+        con = ws_db()
+        if with_accounts:
+            con.execute("DELETE FROM able_state")
+        else:  # 계정(users)과 사람별 설정은 남기고 나머지를 지움
+            con.execute("DELETE FROM able_state WHERE k <> ? AND k NOT LIKE ?", ("users", "settings::%"))
+        con.commit()
+        con.close()
+    except Exception as e:
+        ss.notice = f"⚠️ 초기화 실패: {e}"
+        return
+    for k, v in RESET_KEYS.items():
+        ss[k] = list(v)
+    ss.conv_id = uuid.uuid4().hex
+    ss["_ws_last"] = {}
+    ss.reset_ok = False
+    if with_accounts:
+        ss.users = []
+        log_out()
+        ss.login_msg = "🧹 작업공간과 계정을 모두 지웠습니다. 회원가입부터 다시 시작하세요."
+    else:
+        ss.notice = "🧹 작업공간을 초기화했습니다. 업무·일정·자료·연락처·메일·대화가 모두 비었습니다."
+
+
+_v41_page_settings = page_settings
+
+
+def page_settings():
+    _v41_page_settings()
+    with st.expander("🧹 작업공간 초기화 (시연 준비)"):
+        st.caption("팀 전체의 업무·일정·자료실·연락처·보낸 메일·초안·변경 기록·대화를 모두 지웁니다. 되돌릴 수 없으니 "
+                   "필요하면 위의 '백업 ZIP 다운로드'를 먼저 받아 두세요.")
+        st.checkbox("로그인 계정도 모두 지우기", key="reset_accounts")
+        st.checkbox("모든 데이터를 지우는 것에 동의합니다", key="reset_ok")
+        st.button("🧹 지금 초기화", on_click=reset_workspace, type="primary")
+
+
+# ── 42. 음성 입력은 한국어로만 인식 ──
+ss.settings["stt_lang"] = "ko"
+
+
+def stt(audio_bytes):
+    r = client.audio.transcriptions.create(
+        model="whisper-1", file=("audio.wav", audio_bytes, "audio/wav"), language="ko",
+        prompt="다음은 한국어로 말한 업무 요청입니다.")
+    return r.text
+
+
+# ── 43. 팀 업무 현황: 진행 중인 업무 한꺼번에 비우기 ──
+def clear_in_progress():
+    gone = [t for t in ss.tasks if t["상태"] == "진행 중"]
+    for t in gone:
+        record_change(t, "삭제", t["업무"], "삭제됨")
+        for k in [f"chk_{t['id']}", f"home_chk_{t['id']}"]:
+            ss.pop(k, None)
+    ss.tasks = [t for t in ss.tasks if t["상태"] != "진행 중"]
+    ss.notice = f"🧹 진행 중인 업무 {len(gone)}건을 비웠습니다."
+
+
+_v43_page_team = page_team
+
+
+def page_team():
+    _v43_page_team()
+    n = sum(t["상태"] == "진행 중" for t in ss.tasks)
+    with st.expander(f"🧹 진행 중인 업무 모두 비우기 ({n}건)"):
+        st.caption("팀 전체에서 상태가 '진행 중'인 업무를 모두 지웁니다. 대기·완료 업무는 그대로 둡니다.")
+        st.button("🧹 진행 중 업무 비우기", on_click=clear_in_progress, disabled=n == 0, key="clear_prog")
 
 
 # ── 38. 채팅·메일 작성에서 팀원에게 메일을 보낼 때 첨부파일도 함께 발송 ──
@@ -4004,7 +4079,7 @@ with st.sidebar:
     if ss.get("user"):
         st.button(":material/logout: 로그아웃", on_click=log_out, key="logout_btn", type="tertiary")
     st.caption(f"🗄️ 저장소: {DB_KIND} · 📁 자료 {len(ss.library)} · 📇 연락처 {len(ss.contacts)} · 📥 검토 {len(ss.candidates)}")
-    st.caption("버전: v13 · 2026-11-05 (마이크 → 입력창에 글자)")
+    st.caption("버전: v14 · 2026-11-05 (샘플 데이터 삭제·음성 한국어)")
     if ACCESS_PW and st.button("🔒 잠금"):
         ss.authenticated = False
         st.rerun()
