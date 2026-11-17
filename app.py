@@ -82,11 +82,13 @@ except Exception:
 #             AI 문서 초안(Word), FAQ 검색·공식 답변, 질문 분류·응답 시간 통계, AI 설정, 문서 미리보기
 #   - 퀴즈: 업로드한 학습자료만 근거로, 유형(4지선다·O/X·빈칸)과 문항 수를 골라 출제
 #   - v6.1: 추천 질문은 첫 화면에만, 백서로 답할 수 있는 질문만 표시 / PDF 본문 읽기 3단계 보강
+#   - v6.2: 사이드바 문서 문구 제거, 새 대화·대화 삭제를 학습 도우미 탭으로, 답변 오류 처리
+#   - v6.3: 이어서 물어볼 질문은 백서로 답할 수 있는 것만 추천, 이어서 한 질문도 근거 없으면 "확인할 수 없습니다", 백서 docx 업로드 지원
 #
 # 원칙: 모든 AI 기능은 "업로드한 문서에 있는 내용만" 근거로 답한다.
 # =====================================================================
 
-APP_VERSION = "v6.2 · 통합본 (대화 버튼 이동 · 답변 오류 처리)"   # 배포 확인용 (사이드바 맨 아래 표시)
+APP_VERSION = "v6.3 · 통합본 (이어서 질문 수정 · Word 백서 지원)"   # 배포 확인용 (사이드바 맨 아래 표시)
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
 NO_ANSWER = "백서에서 해당 내용을 확인할 수 없습니다."
 KST = ZoneInfo("Asia/Seoul")
@@ -288,6 +290,63 @@ def load_pdf_documents(filepath):
     return [by_page[p] for p in sorted(by_page)]
 
 
+DOCX_SECTION_CHARS = 1500   # docx는 쪽이 없어서, 제목 또는 약 1500자 단위로 '부분'을 나눈다
+
+
+def load_docx_documents(filepath):
+    """[추가] Word(docx) 백서 읽기: 별도 설치 없이 docx 안의 문단·표를 꺼내 '부분' 단위 Document로 만든다."""
+    import zipfile
+    from xml.etree import ElementTree as ET
+    from langchain_core.documents import Document
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(str(filepath)) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+    body = root.find(W + "body")
+    blocks = []                                   # (제목 여부, 글)
+    for el in (body if body is not None else []):
+        if el.tag == W + "p":
+            text = "".join(t.text or "" for t in el.iter(W + "t")).strip()
+            if not text:
+                continue
+            style = el.find(f"{W}pPr/{W}pStyle")
+            sval = (style.get(W + "val", "") if style is not None else "").lower()
+            heading = sval.startswith(("heading", "title", "제목")) or sval in {"1", "2", "3"}
+            blocks.append((heading, f"## {text}" if heading else text))
+        elif el.tag == W + "tbl":                 # 표는 마크다운 표 모양으로
+            rows = []
+            for tr in el.iter(W + "tr"):
+                cells = [" ".join(t.text or "" for t in tc.iter(W + "t")).strip() for tc in tr.findall(W + "tc")]
+                if any(cells):
+                    rows.append("| " + " | ".join(cells) + " |")
+            if rows:
+                blocks.append((False, "\n".join(rows)))
+    sections, cur, size = [], [], 0
+    for heading, text in blocks:
+        if cur and ((heading and size >= 300) or size + len(text) > DOCX_SECTION_CHARS):   # 너무 짧은 제목 조각은 합침
+            sections.append("\n\n".join(cur))
+            cur, size = [], 0
+        cur.append(text)
+        size += len(text)
+    if cur:
+        sections.append("\n\n".join(cur))
+    return [Document(page_content=t, metadata={"source": str(filepath), "page": i, "kind": "docx"})
+            for i, t in enumerate(sections) if t.strip()]
+
+
+def is_docx(path_or_bytes):
+    """docx는 zip 파일이라 'PK'로 시작한다 (PDF는 '%PDF')."""
+    if isinstance(path_or_bytes, (bytes, bytearray)):
+        return bytes(path_or_bytes[:2]) == b"PK"
+    return str(path_or_bytes).lower().endswith(".docx")
+
+
+def load_documents(filepath):
+    """[추가] 파일 종류에 맞게 읽기: docx → load_docx_documents, 그 외(PDF) → load_pdf_documents"""
+    if is_docx(filepath):
+        return load_docx_documents(filepath)
+    return load_pdf_documents(filepath)
+
+
 # =====================================================================
 # RAG 파이프라인 (01번 노트북 함수와 같은 동작)
 # rag_pipeline(경로)만 넣으면 기존과 똑같이 체인을 반환한다.
@@ -297,9 +356,9 @@ def rag_pipeline(filepath, chunk_size=1000, chunk_overlap=200, k=4,
                  collection_name="aivle_docs", return_details=False):
     # 1. PDF 파일 읽기 (비어 있는 문서 제외)
     #    [수정] PyMuPDF4LLM이 본문을 못 읽는 PDF는 일반 텍스트 추출 → 이미지 글자 읽기(OCR) 순서로 다시 읽는다.
-    docs = load_pdf_documents(filepath)
+    docs = load_documents(filepath)
     if not docs:
-        raise ValueError("PDF에서 읽을 수 있는 본문이 없습니다. 글자를 선택·복사할 수 있는 PDF인지 확인해 주세요.")
+        raise ValueError("문서에서 읽을 수 있는 본문이 없습니다. 글자를 선택·복사할 수 있는 PDF 또는 Word(docx) 파일인지 확인해 주세요.")
     print(f"1. PDF 읽기 완료: {len(docs)}개 Document")
 
     # 2. 텍스트 분할
@@ -490,7 +549,7 @@ def get_store():
     config.update(read_json(DATA_DIR / "config.json", {}))
 
     docs = {h: m for h, m in read_json(DATA_DIR / "docs.json", {}).items() if Path(m["path"]).exists()}
-    bundled = sorted(BUNDLED_DIR.glob("*.pdf")) if BUNDLED_DIR.exists() else []
+    bundled = (sorted(BUNDLED_DIR.glob("*.pdf")) + sorted(BUNDLED_DIR.glob("*.docx"))) if BUNDLED_DIR.exists() else []
     if DEFAULT_PDF.exists():                     # [통합 app.py] 같은 폴더의 기본 백서도 등록
         bundled.append(DEFAULT_PDF)
     for p in bundled:
@@ -583,7 +642,9 @@ def get_llm():
 
 def page_label(doc):
     page = doc.metadata.get("page")
-    return f"p.{page + 1}" if isinstance(page, int) else "페이지 정보 없음"
+    if not isinstance(page, int):
+        return "페이지 정보 없음"
+    return f"{page + 1}번째 부분" if doc.metadata.get("kind") == "docx" else f"p.{page + 1}"
 
 
 def format_docs_with_pages(docs):
@@ -667,8 +728,8 @@ def on_feedback(msg_id):
 # ---------------------------------------------------------------------
 @st.cache_resource(show_spinner=False, max_entries=10)
 def build_rag(file_hash, _file_bytes, chunk_size, chunk_overlap, k):
-    # ① 임시 파일 생성 (.pdf) ② 업로드 내용 저장 ③ 경로 확보 (tmp.name)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+    # ① 임시 파일 생성 (.pdf 또는 .docx) ② 업로드 내용 저장 ③ 경로 확보 (tmp.name)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx" if is_docx(_file_bytes) else ".pdf") as tmp:
         tmp.write(_file_bytes)
         tmp_path = tmp.name
     try:
@@ -721,7 +782,7 @@ def load_library_doc(file_hash, notify=True):
 
 def add_to_library(file_bytes, name):
     file_hash = md5(file_bytes)
-    path = DOC_DIR / f"{file_hash}.pdf"
+    path = DOC_DIR / f"{file_hash}{'.docx' if is_docx(file_bytes) else '.pdf'}"
     DOC_DIR.mkdir(parents=True, exist_ok=True)
     path.write_bytes(file_bytes)
     with STORE["lock"]:
@@ -779,7 +840,7 @@ def standalone_question(question, history):
     if not needs_context(question, history):     # [통합 소연] 독립된 새 질문이면 LLM 호출을 아낀다
         return question
     lines = []
-    for m in history[-4:]:
+    for m in history[-6:]:                       # [수정] 최근 3번의 질문·답변을 참고 (기존 2번)
         who = "사용자" if isinstance(m, HumanMessage) else "도우미"
         lines.append(f"{who}: {m.content[:300]}")
     prompt = ChatPromptTemplate.from_messages([
@@ -789,6 +850,9 @@ def standalone_question(question, history):
     try:
         result = (prompt | get_llm() | StrOutputParser()).invoke(
             {"history": "\n".join(lines), "question": question}).strip()
+        # [수정] 다시 쓴 결과가 이상하면(답변 문구·너무 긴 글) 원래 질문을 그대로 쓴다
+        if not result or NO_ANSWER[:10] in result or len(result) > 200:
+            return question
         return normalize_question(result) or question
     except Exception:
         return question
@@ -1194,16 +1258,26 @@ def stream_answer(question):
         return text
 
 
-def suggest_followups(question, answer):
-    """[app.py] 답변을 보고 이어서 물어볼 질문 3개 추천 (답변에 나온 내용 범위 안에서)"""
+def suggest_followups(question, answer, docs=None):
+    """[app.py] 이어서 물어볼 질문 추천.
+    [수정] 후보 5개를 만든 뒤, 추천 질문과 같은 검사로 '백서에서 답할 수 있는 질문'만 최대 3개 남긴다.
+    (누르면 '확인할 수 없습니다'가 나오는 후속 질문을 없앰) 질문만 봐도 뜻이 통하도록 대명사 없이 만든다."""
     try:
+        ctx = format_docs_with_pages(docs[:4]) if docs else "(없음)"
         out = task_llm(0.5).invoke([
-            ("system", "학습자가 이어서 물어볼 만한 짧은 질문 3개를 한 줄에 하나씩, 번호나 기호 없이 출력하세요. "
-                       "아래 답변에 나온 내용과 관련된 질문만 만드세요."),
-            ("human", f"질문: {question}\n답변: {answer[:1500]}"),
+            ("system", "학습자가 이어서 물어볼 만한 짧은 질문 5개를 한 줄에 하나씩, 번호나 기호 없이 출력하세요.\n"
+                       "규칙: 아래 [참고 문서]에 답이 분명히 적혀 있는 질문만 만드세요. "
+                       "'그것', '이거'처럼 앞 대화를 봐야 하는 말 대신 대상을 직접 써서, 질문만 읽어도 뜻이 통하게 쓰세요. "
+                       "처음 질문과 같은 질문은 만들지 마세요."),
+            ("human", f"처음 질문: {question}\n답변: {answer[:1500]}\n\n[참고 문서]\n{ctx}"),
         ]).content
         qs = [re.sub(r"^[\d\.\-\*•\s]+", "", line).strip() for line in out.splitlines()]
-        return [q for q in qs if q][:3]
+        qs = [q for q in dict.fromkeys(qs) if q and normalize_q(q) != normalize_q(question)][:5]
+        if not qs:
+            return []
+        ok = answerable_questions(st.session_state.doc_hash, json.dumps(CFG["settings"], sort_keys=True),
+                                  tuple(qs))
+        return ok[:3]
     except Exception:
         return []
 
@@ -1260,7 +1334,7 @@ with st.sidebar:
 
     # --- 관리자: 파일 업로드 (드래그 앤 드롭) / 문서 변경 ---
     st.subheader("관리자")
-    uploaded = st.file_uploader("백서 PDF를 드래그하거나 클릭해 선택하세요", type=["pdf"],
+    uploaded = st.file_uploader("백서(PDF·Word)를 드래그하거나 클릭해 선택하세요", type=["pdf", "docx"],
                                 key=f"uploader_{st.session_state.uploader_key}")
     if uploaded is not None:
         file_id = getattr(uploaded, "file_id", None) or f"{uploaded.name}_{uploaded.size}"
@@ -1280,7 +1354,7 @@ with st.sidebar:
     if info:
         st.button("📤 문서 해제", on_click=unload_document, width="stretch")
     else:
-        st.info("백서 PDF를 올리면 바로 질문할 수 있어요.")
+        st.info("백서(PDF·Word)를 올리면 바로 질문할 수 있어요.")
 
     # (추천 질문은 학습 도우미 첫 화면에만 표시 — 사이드바에서는 뺐음)
 
@@ -1367,7 +1441,8 @@ def page_chat():
 
     with st.container(key="chat_area"):
         msg_box = st.container(height=520, border=False)    # 대화가 길어지면 이 안에서 스크롤
-        value = st.chat_input("질문을 입력하세요  (+ 버튼으로 백서 PDF 첨부)", accept_file=True, file_type=["pdf"])
+        value = st.chat_input("질문을 입력하세요  (+ 버튼으로 백서 PDF·Word 첨부)", accept_file=True,
+                              file_type=["pdf", "docx"])
 
     user_input, attached = None, None
     if value:
@@ -1409,7 +1484,7 @@ def page_chat():
                 c2.button("✍️ AI 문서 작성", on_click=go, args=("writer",), width="stretch")
             else:
                 st.markdown("""<div class="hero"><h4>시작하려면 백서를 올려 주세요 📂</h4>
-                    왼쪽 <b>관리자</b> 영역에 PDF를 <b>드래그</b>하거나, 입력창의 <b>+</b> 버튼으로 첨부하세요.</div>""",
+                    왼쪽 <b>관리자</b> 영역에 PDF·Word 파일을 <b>드래그</b>하거나, 입력창의 <b>+</b> 버튼으로 첨부하세요.</div>""",
                             unsafe_allow_html=True)
 
         # 기존 대화 내용 출력 (기존 코드 방식)
@@ -1477,6 +1552,7 @@ def page_chat():
                                     res = precise_answer(user_input, search_q)
                             except Exception:
                                 res = None                             # 실패하면 기본 방식으로 답변
+                        used_docs = []
                         if plan_reply:
                             full_response, plan_made = plan_reply, True
                             st.markdown(md(full_response))
@@ -1486,19 +1562,23 @@ def page_chat():
                             st.markdown(md(full_response))
                             if status == "partial":
                                 st.caption("⚠️ 백서에서 일부 내용만 확인된 답변이에요.")
-                            sources = to_sources(res["docs"])
+                            used_docs = res["docs"]
+                            sources = to_sources(used_docs)
                             render_sources(sources)
                         else:                                          # 기존 방식 (rag_chain 스트리밍)
+                            # 이어서 한 질문도 근거가 없으면 rag_chain 규칙대로 "백서에서 해당 내용을 확인할 수 없습니다."로 답한다
                             full_response = stream_answer(search_q)
                             no_answer = NO_ANSWER in full_response
                             if not no_answer:
                                 try:
-                                    sources = to_sources(st.session_state.retriever.invoke(search_q))
+                                    used_docs = st.session_state.retriever.invoke(search_q)
                                 except Exception:
-                                    sources = []
+                                    used_docs = []
+                                sources = to_sources(used_docs)
                                 render_sources(sources)
                         if not no_answer and not plan_made:
-                            followups = suggest_followups(user_input, full_response)
+                            with st.spinner("이어서 물어볼 질문을 고르는 중..."):
+                                followups = suggest_followups(user_input, full_response, used_docs)
                     except Exception as e:
                         full_response = friendly_error(e)
                         status = "error"
@@ -2352,7 +2432,7 @@ def schedule_plan_tab():
 
 # =====================================================================
 # 페이지 ④ 이해도 퀴즈 (업로드한 학습자료에서만 출제)
-#   - 학습자료(PDF)를 고르고 유형·문항 수를 정해 '문제 만들기'를 누르면 출제된다.
+#   - 학습자료(PDF·Word)를 고르고 유형·문항 수를 정해 '문제 만들기'를 누르면 출제된다.
 #   - [유빈] 문제마다 자료 원문 인용을 받아, 실제 자료에 있는 문장인지 확인한 문제만 보여 준다.
 # =====================================================================
 LEVELS = {   # [유빈] 학습 수준별 설명·출제 방식
@@ -2473,7 +2553,7 @@ def quiz_source():
         return {"key": f"cur_{st.session_state.doc_hash}", "name": doc_name(),
                 "retriever": st.session_state.retriever, "chunks": st.session_state.doc_chunks}
 
-    f = st.file_uploader("퀴즈로 만들 학습자료(PDF)를 올려 주세요", type=["pdf"], key="quiz_upload")
+    f = st.file_uploader("퀴즈로 만들 학습자료(PDF·Word)를 올려 주세요", type=["pdf", "docx"], key="quiz_upload")
     if f is not None:
         data = f.getvalue()
         h = md5(data)
@@ -2513,7 +2593,7 @@ def page_quiz():
     # ① 학습자료 고르기
     src = quiz_source()
     if not src:
-        st.info("학습자료(PDF)를 올린 뒤, 문제 유형과 문항 수를 고르고 '문제 만들기'를 눌러 주세요.")
+        st.info("학습자료(PDF·Word)를 올린 뒤, 문제 유형과 문항 수를 고르고 '문제 만들기'를 눌러 주세요.")
         return
     st.caption(f"📄 출제 자료: **{src['name']}** · {len(src['chunks'])}개 조각")
 
@@ -3487,6 +3567,8 @@ def admin_dashboard_extra():
 
 @st.cache_data(show_spinner=False, max_entries=20)
 def pdf_page_texts(path):
+    if is_docx(path):                       # docx는 '부분' 단위로 미리보기
+        return [d.page_content for d in load_docx_documents(path)]
     if pymupdf is None:
         return []
     with pymupdf.open(path) as pdf:
@@ -3495,7 +3577,7 @@ def pdf_page_texts(path):
 
 def admin_documents():
     st.markdown("**문서 등록** · 등록한 문서는 모든 사용자가 선택할 수 있고, 기본 문서는 접속하자마자 자동으로 준비됩니다.")
-    files = st.file_uploader("PDF 등록 (여러 개 가능)", type=["pdf"], accept_multiple_files=True,
+    files = st.file_uploader("PDF·Word 등록 (여러 개 가능)", type=["pdf", "docx"], accept_multiple_files=True,
                              key=f"admin_up_{st.session_state.admin_upload_key}")
     if files and st.button("라이브러리에 등록", type="primary"):
         for f in files:
@@ -3524,7 +3606,9 @@ def admin_documents():
                 load_library_doc(h)
                 st.rerun()
             b[2].download_button("다운로드", Path(meta["path"]).read_bytes(), file_name=meta["name"],
-                                 mime="application/pdf", key=f"dl_{h}", width="stretch")
+                                 mime=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                       if is_docx(meta["path"]) else "application/pdf"),
+                                 key=f"dl_{h}", width="stretch")
             if b[3].button("삭제", key=f"del_{h}", disabled=meta.get("bundled", False), width="stretch"):
                 delete_library_doc(h)
                 st.rerun()
