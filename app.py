@@ -86,7 +86,7 @@ except Exception:
 # 원칙: 모든 AI 기능은 "업로드한 문서에 있는 내용만" 근거로 답한다.
 # =====================================================================
 
-APP_VERSION = "v6.1 · 통합본 (답변 가능한 추천 질문 · PDF 읽기 보강)"   # 배포 확인용 (사이드바 맨 아래 표시)
+APP_VERSION = "v6.2 · 통합본 (대화 버튼 이동 · 답변 오류 처리)"   # 배포 확인용 (사이드바 맨 아래 표시)
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
 NO_ANSWER = "백서에서 해당 내용을 확인할 수 없습니다."
 KST = ZoneInfo("Asia/Seoul")
@@ -675,7 +675,8 @@ def build_rag(file_hash, _file_bytes, chunk_size, chunk_overlap, k):
         # ④ RAG 파이프라인에 "경로" 전달
         return rag_pipeline(
             tmp_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap, k=k,
-            collection_name=f"aivle_{file_hash[:16]}_{chunk_size}_{chunk_overlap}_{k}",
+            # [수정] 만들 때마다 새 이름: 다시 만들 때 reset_collection이 다른 사용자의 컬렉션을 지우지 않게
+            collection_name=f"aivle_{file_hash[:12]}_{chunk_size}_{chunk_overlap}_{k}_{uuid.uuid4().hex[:6]}",
             return_details=True,
         )
     finally:
@@ -1146,6 +1147,53 @@ def precise_answer(question, resolved):
     return {"answer": answer, "status": status, "docs": [docs[i - 1] for i in ids]}
 
 
+def friendly_error(e):
+    """[수정] OpenAI·검색 오류를 사용자가 이해할 수 있는 안내로 바꾼다."""
+    text = f"{type(e).__name__}: {e}"
+    low = text.lower()
+    if "insufficient_quota" in low or "quota" in low:
+        msg = "OpenAI 사용 한도를 넘었어요. API 키의 결제·사용량을 확인해 주세요."
+    elif "rate limit" in low or "rate_limit" in low or "429" in low:
+        msg = "질문이 한꺼번에 몰렸어요. 잠시 후 다시 질문해 주세요."
+    elif "api key" in low or "api_key" in low or "401" in low or "authentication" in low:
+        msg = "OpenAI API 키가 올바르지 않아요. Secrets의 OPENAI_API_KEY를 확인해 주세요."
+    elif "timeout" in low or "timed out" in low or "connection" in low:
+        msg = "OpenAI 서버 연결이 잠시 끊겼어요. 다시 질문해 주세요."
+    elif "does not exist" in low or "collection" in low:
+        msg = "문서 검색 데이터가 초기화됐어요. 왼쪽에서 백서를 다시 선택하거나 올린 뒤 질문해 주세요."
+    else:
+        msg = "답변을 만드는 중 문제가 생겼어요. 다시 질문해 주세요."
+    return f"⚠️ {msg}\n\n(오류 내용: {text[:200]})"
+
+
+def _is_missing_collection(e):
+    low = str(e).lower()
+    return "does not exist" in low or "notfound" in type(e).__name__.lower()
+
+
+def stream_answer(question):
+    """[수정] 기존 rag_chain으로 스트리밍 답변. 실패하면 검색 데이터를 다시 준비하고 한 번 더 시도한다."""
+    raw = []
+
+    def _gen(stream):
+        for chunk in stream:
+            raw.append(chunk)
+            yield md(chunk)
+    try:
+        st.write_stream(_gen(st.session_state.rag_chain.stream({"input": question})))
+        return "".join(raw)
+    except Exception as e:
+        if raw:                         # 답변이 중간까지 나왔으면 나온 만큼 보여 준다
+            return "".join(raw) + "\n\n(답변이 중간에 끊겼어요. 다시 질문해 주세요.)"
+        if _is_missing_collection(e) and st.session_state.doc_bytes:
+            build_rag.clear()           # 검색 데이터가 사라졌으면 새로 만든다
+            activate_doc(st.session_state.doc_bytes, doc_name(), st.session_state.doc_hash, notify=False)
+        time.sleep(1)
+        text = st.session_state.rag_chain.invoke({"input": question})   # 재시도 (스트리밍 없이)
+        st.markdown(md(text))
+        return text
+
+
 def suggest_followups(question, answer):
     """[app.py] 답변을 보고 이어서 물어볼 질문 3개 추천 (답변에 나온 내용 범위 안에서)"""
     try:
@@ -1230,7 +1278,6 @@ with st.sidebar:
 
     info = st.session_state.doc_info
     if info:
-        st.success(f"사용 중: **{info['name']}**\n\n{info['pages']}페이지 · {info['chunks']}개 조각")
         st.button("📤 문서 해제", on_click=unload_document, width="stretch")
     else:
         st.info("백서 PDF를 올리면 바로 질문할 수 있어요.")
@@ -1245,11 +1292,7 @@ with st.sidebar:
     if len(convs) > 1:
         st.selectbox("대화 선택", options=list(convs), format_func=lambda c: convs[c]["title"],
                      key="conv_select", on_change=switch_conversation, label_visibility="collapsed")
-    c1, c2 = st.columns(2)
-    c1.button("➕ 새 대화", on_click=new_conversation, width="stretch",
-              disabled=not st.session_state.messages)
-    c2.button("🗑️ 대화 삭제", on_click=delete_conversation, width="stretch",
-              disabled=not st.session_state.messages and len(convs) == 1)
+    # (새 대화 · 대화 삭제 버튼은 학습 도우미 탭 상단으로 옮김)
     st.download_button("💾 대화 저장", conversation_to_markdown(st.session_state.messages,
                                                              convs[st.session_state.current_conv]["title"]),
                        file_name="aivle_chat.md", mime="text/markdown", width="stretch",
@@ -1289,7 +1332,12 @@ with st.sidebar:
 # 페이지 ① 학습 도우미 (채팅)
 # =====================================================================
 def page_chat():
-    # 상단 도구: 맥락 반영 / 정밀 답변 / 대화 내보내기·불러오기
+    # 상단 도구: 새 대화 · 대화 삭제 / 맥락 반영 / 정밀 답변 / 대화 내보내기·불러오기
+    b1, b2, _ = st.columns([1, 1, 3])
+    b1.button("➕ 새 대화", on_click=new_conversation, width="stretch",
+              disabled=not st.session_state.messages)
+    b2.button("🗑️ 대화 삭제", on_click=delete_conversation, width="stretch",
+              disabled=not st.session_state.messages and len(st.session_state.conversations) == 1)
     t1, t1b, t2 = st.columns([2, 2, 1])
     st.session_state.use_context = t1.toggle("이전 대화 맥락 반영 (후속 질문 이해)",
                                              value=st.session_state.use_context)
@@ -1407,22 +1455,32 @@ def page_chat():
                     full_response = "아직 백서가 업로드되지 않았어요. 왼쪽 관리자 영역에 PDF를 올려 주세요."
                     st.markdown(full_response)
                 else:
-                    try:
-                        norm_q = normalize_question(user_input)        # [통합 소연] 용어 통일
-                        search_q = norm_q
-                        if st.session_state.use_context:
+                    # [수정] 단계마다 오류를 따로 처리해, 부가 단계가 실패해도 답변은 나오게 한다.
+                    norm_q = normalize_question(user_input)            # [통합 소연] 용어 통일
+                    search_q = norm_q
+                    if st.session_state.use_context:
+                        try:
                             search_q = standalone_question(norm_q, history)
-                            if search_q != norm_q:
-                                rewritten = search_q
-                                st.caption(f"🔁 이렇게 이해했어요: {search_q}")
-
-                        plan_reply = chat_make_plan(user_input) if looks_like_plan_request(user_input) else None
-                        if plan_reply:                                 # [통합 인영] 채팅 → 학습 계획
+                        except Exception:
+                            search_q = norm_q
+                        if search_q != norm_q:
+                            rewritten = search_q
+                            st.caption(f"🔁 이렇게 이해했어요: {search_q}")
+                    try:
+                        plan_reply = None
+                        if looks_like_plan_request(user_input):        # [통합 인영] 채팅 → 학습 계획
+                            plan_reply = chat_make_plan(user_input)
+                        res = None
+                        if not plan_reply and st.session_state.precise_mode:   # [통합 소연] 정밀 답변
+                            try:
+                                with st.spinner("백서에서 관련 근거를 꼼꼼히 찾는 중..."):
+                                    res = precise_answer(user_input, search_q)
+                            except Exception:
+                                res = None                             # 실패하면 기본 방식으로 답변
+                        if plan_reply:
                             full_response, plan_made = plan_reply, True
                             st.markdown(md(full_response))
-                        elif st.session_state.precise_mode:            # [통합 소연] 정밀 답변 모드
-                            with st.spinner("백서에서 관련 근거를 꼼꼼히 찾는 중..."):
-                                res = precise_answer(user_input, search_q)
+                        elif res is not None:
                             full_response, status = res["answer"], res["status"]
                             no_answer = status == "not_found"
                             st.markdown(md(full_response))
@@ -1431,22 +1489,19 @@ def page_chat():
                             sources = to_sources(res["docs"])
                             render_sources(sources)
                         else:                                          # 기존 방식 (rag_chain 스트리밍)
-                            raw = []
-
-                            def _gen(stream):
-                                for chunk in stream:
-                                    raw.append(chunk)
-                                    yield md(chunk)
-                            st.write_stream(_gen(st.session_state.rag_chain.stream({"input": search_q})))
-                            full_response = "".join(raw)
+                            full_response = stream_answer(search_q)
                             no_answer = NO_ANSWER in full_response
                             if not no_answer:
-                                sources = to_sources(st.session_state.retriever.invoke(search_q))
+                                try:
+                                    sources = to_sources(st.session_state.retriever.invoke(search_q))
+                                except Exception:
+                                    sources = []
                                 render_sources(sources)
                         if not no_answer and not plan_made:
                             followups = suggest_followups(user_input, full_response)
                     except Exception as e:
-                        full_response = f"답변 생성 중 오류가 발생했습니다: {e}"
+                        full_response = friendly_error(e)
+                        status = "error"
                         st.error(full_response)
 
             msg_id = uuid.uuid4().hex[:12]
