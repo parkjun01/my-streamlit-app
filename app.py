@@ -84,11 +84,12 @@ except Exception:
 #   - v6.1: 추천 질문은 첫 화면에만, 백서로 답할 수 있는 질문만 표시 / PDF 본문 읽기 3단계 보강
 #   - v6.2: 사이드바 문서 문구 제거, 새 대화·대화 삭제를 학습 도우미 탭으로, 답변 오류 처리
 #   - v6.3: 이어서 물어볼 질문은 백서로 답할 수 있는 것만 추천, 이어서 한 질문도 근거 없으면 "확인할 수 없습니다", 백서 docx 업로드 지원
+#   - v6.4: 새 대화를 연 뒤 이어서 질문할 때 나던 KeyError 수정 (대화 선택 상자가 제목을 기억하던 문제)
 #
 # 원칙: 모든 AI 기능은 "업로드한 문서에 있는 내용만" 근거로 답한다.
 # =====================================================================
 
-APP_VERSION = "v6.3 · 통합본 (이어서 질문 수정 · Word 백서 지원)"   # 배포 확인용 (사이드바 맨 아래 표시)
+APP_VERSION = "v6.4 · 통합본 (새 대화 KeyError 수정)"   # 배포 확인용 (사이드바 맨 아래 표시)
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
 NO_ANSWER = "백서에서 해당 내용을 확인할 수 없습니다."
 KST = ZoneInfo("Asia/Seoul")
@@ -622,6 +623,9 @@ if "conversations" not in st.session_state:
     first_id = uuid.uuid4().hex[:8]
     st.session_state.conversations = {first_id: {"title": "새 대화", "messages": [], "created": now_str()}}
     st.session_state.current_conv = first_id
+# [수정] 현재 대화가 목록에 없으면(삭제·잘못된 선택값) KeyError 대신 마지막 대화로 되돌린다
+if st.session_state.get("current_conv") not in st.session_state.conversations:
+    st.session_state.current_conv = list(st.session_state.conversations)[-1]
 st.session_state.messages = st.session_state.conversations[st.session_state.current_conv]["messages"]
 
 
@@ -967,7 +971,6 @@ def new_conversation():
     cid = uuid.uuid4().hex[:8]
     st.session_state.conversations[cid] = {"title": "새 대화", "messages": [], "created": now_str()}
     st.session_state.current_conv = cid
-    st.session_state.conv_select = cid
 
 
 def delete_conversation():
@@ -981,11 +984,11 @@ def delete_conversation():
     else:
         convs[cur]["messages"].clear()
         convs[cur]["title"] = "새 대화"
-    st.session_state.conv_select = st.session_state.current_conv
 
 
-def switch_conversation():
-    st.session_state.current_conv = st.session_state.conv_select
+def switch_conversation(cid):
+    if cid in st.session_state.conversations:
+        st.session_state.current_conv = cid
 
 
 def conversation_to_json(messages):
@@ -1016,7 +1019,6 @@ def import_conversation(raw):
     cid = uuid.uuid4().hex[:8]
     st.session_state.conversations[cid] = {"title": "📂 " + first_q[:18], "messages": messages, "created": now_str()}
     st.session_state.current_conv = cid
-    st.session_state.conv_select = cid
 
 
 # =====================================================================
@@ -1361,11 +1363,16 @@ with st.sidebar:
     # --- 대화 기록 관리 (새 대화 / 전환 / 삭제 / 저장) ---
     st.subheader("💬 대화")
     convs = st.session_state.conversations
-    if st.session_state.get("conv_select") not in convs:
-        st.session_state.conv_select = st.session_state.current_conv
     if len(convs) > 1:
-        st.selectbox("대화 선택", options=list(convs), format_func=lambda c: convs[c]["title"],
-                     key="conv_select", on_change=switch_conversation, label_visibility="collapsed")
+        # [수정] 선택값을 '제목'으로 기억하는 key 방식은 제목이 바뀌면(새 대화 → 첫 질문) KeyError가 났다.
+        #        번호를 붙여 이름이 겹치지 않게 하고, 매번 현재 대화를 기준으로 다시 그린다.
+        ids = list(convs)
+        labels = {c: f"{i + 1}. {convs[c]['title']}" for i, c in enumerate(ids)}
+        picked = st.selectbox("대화 선택", options=ids, index=ids.index(st.session_state.current_conv),
+                              format_func=lambda c: labels.get(c, "대화"), label_visibility="collapsed")
+        if picked in convs and picked != st.session_state.current_conv:
+            switch_conversation(picked)
+            st.rerun()
     # (새 대화 · 대화 삭제 버튼은 학습 도우미 탭 상단으로 옮김)
     st.download_button("💾 대화 저장", conversation_to_markdown(st.session_state.messages,
                                                              convs[st.session_state.current_conv]["title"]),
