@@ -5,8 +5,3 @@ langchain-text-splitters==1.1.2
 langchain-chroma==1.1.0
 chromadb==1.5.9
 langchain-pymupdf4llm==1.28.0
-pandas
-requests
-reportlab
-python-pptx
-python-docx
